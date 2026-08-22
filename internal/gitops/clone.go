@@ -71,7 +71,7 @@ func Clone(ctx context.Context, workRoot string, req CloneRequest) (CloneResult,
 		}
 	}
 
-	mprPath, err := findMpr(workDir)
+	mprPath, err := FindMpr(workDir)
 	if err != nil {
 		os.RemoveAll(workDir)
 		return CloneResult{}, err
@@ -79,6 +79,18 @@ func Clone(ctx context.Context, workRoot string, req CloneRequest) (CloneResult,
 
 	return CloneResult{WorkDir: workDir, MprPath: mprPath}, nil
 }
+
+
+// TODO: Implement in Step 6 from MERA-stage8-plan.md
+
+// type CloneBothRequest struct {
+//     RepoURL, Username, Pat, BaseSha, HeadSha string
+// }
+// type CloneBothResult struct {
+//     WorkDir, BaseDir, HeadDir string
+// }
+// func CloneBoth(ctx context.Context, workRoot string, req CloneBothRequest) (CloneBothResult, error) 
+
 
 // Cleanup removes everything Clone created. Call it once you're done
 // reading from WorkDir — via `defer` if the whole lifecycle fits in one
@@ -113,9 +125,9 @@ func hostOf(repoURL string) (string, error) {
 	return u.Host, nil
 }
 
-// findMpr locates the model file without assuming a name — App.mpr is a
+// FindMpr locates the model file without assuming a name — App.mpr is a
 // common default, but your own test app is named MERA.mpr.
-func findMpr(workDir string) (string, error) {
+func FindMpr(workDir string) (string, error) {
 	matches, err := filepath.Glob(filepath.Join(workDir, "*.mpr"))
 	if err != nil {
 		return "", fmt.Errorf("glob for .mpr in %q: %w", workDir, err)

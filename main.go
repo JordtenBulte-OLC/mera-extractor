@@ -10,6 +10,7 @@ import (
 
 	"mera-extractor/internal/api"
 	"mera-extractor/internal/mxcli"
+	"mera-extractor/internal/mx"
 )
 
 func main() {
@@ -20,6 +21,15 @@ func main() {
 	workRoot := os.Getenv("MERA_WORK_ROOT")
 	if workRoot == "" {
 		workRoot = os.TempDir()
+	}
+
+	mxRoot := os.Getenv("MERA_MX_ROOT")
+	if mxRoot == "" {
+		mxRoot = "/opt/mx"
+	}
+
+	if _, err := mx.Highest(mxRoot); err != nil {
+    	log.Printf("warning: no usable mx binary found under %s: %v", mxRoot, err)
 	}
 
 	port := os.Getenv("PORT")
@@ -35,7 +45,7 @@ func main() {
 		}
 	}
 
-	srv := api.NewServer(workRoot)
+	srv := api.NewServer(workRoot, mxRoot)
 
 	addr := ":" + port
 	log.Printf("extractor listening on %s (workRoot=%s)", addr, workRoot)

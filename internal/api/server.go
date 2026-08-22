@@ -5,10 +5,11 @@ import "net/http"
 
 type Server struct {
 	WorkRoot string // where clones get created; see gitops.Clone
+	MxRoot   string // where mx/mxbuild binaries live; see internal/mx.Resolve/Highest
 }
 
-func NewServer(workRoot string) *Server {
-	return &Server{WorkRoot: workRoot}
+func NewServer(workRoot, mxRoot string) *Server {
+	return &Server{WorkRoot: workRoot, MxRoot: mxRoot}
 }
 
 func (s *Server) Routes() *http.ServeMux {
