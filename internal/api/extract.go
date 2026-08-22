@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync"
 
 	"mera-extractor/internal/gitops"
 	"mera-extractor/internal/mxcli"
@@ -66,30 +67,66 @@ func (s *Server) handleExtract(w http.ResponseWriter, r *http.Request) {
 		units = enumerated
 	}
 
-	resp := extractResponse{MprPath: clone.MprPath}
+	unitResults, warnings := describeAll(r.Context(), clone.MprPath, units)
 
-	// Sequential for now — one unit at a time. Once you're describing
-	// hundreds of units in a real change set, this is the first place to
-	// add a worker pool (manual §1.5 uses ~8 concurrent workers). Get it
-	// correct sequentially before making it concurrent — a bug is much
-	// easier to find in a loop than in eight goroutines.
-	for _, u := range units {
-		mdl, err := mxcli.Describe(r.Context(), mxcli.DescribeRequest{
-			MprPath: clone.MprPath, UnitType: u.UnitType, QualifiedName: u.QualifiedName,
-		})
-		result := unitResult{QualifiedName: u.QualifiedName}
-		if err != nil {
-			// One bad unit must never fail the whole extraction —
-			// manual §1.4's core design rule. Record it and move on.
-			result.Warning = err.Error()
-			resp.Warnings = append(resp.Warnings, u.QualifiedName+": "+err.Error())
-		} else {
-			result.Mdl = mdl
-		}
-		resp.Units = append(resp.Units, result)
+	resp := extractResponse{
+		MprPath:  clone.MprPath,
+		Units:    unitResults,
+		Warnings: warnings,
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// describeOutcome pairs a unit's rendered result with its warning text (if
+// any), so both can travel together through the same indexed slot.
+type describeOutcome struct {
+	result  unitResult
+	warning string // "" if the describe succeeded
+}
+
+// describeAll renders every unit in units concurrently.
+// Each goroutine writes only to its own index in outcomes — no mutex
+// needed. Output order still matches input order regardless of completion order.
+
+func describeAll(ctx context.Context, mprPath string, units []unitRequest) ([]unitResult, []string) {
+	if len(units) == 0 {
+		return nil, nil
 	}
 
-	writeJSON(w, http.StatusOK, resp)
+	outcomes := make([]describeOutcome, len(units))
+
+	var wg sync.WaitGroup
+	wg.Add(len(units))
+	for i, u := range units {
+		go func(i int, u unitRequest) {
+			defer wg.Done()
+			mdl, err := mxcli.Describe(ctx, mxcli.DescribeRequest{
+				MprPath: mprPath, UnitType: u.UnitType, QualifiedName: u.QualifiedName,
+			})
+			res := unitResult{QualifiedName: u.QualifiedName}
+			var warn string
+			if err != nil {
+				// One bad unit must never fail the whole extraction —
+				// manual §1.4's core design rule, unchanged here.
+				res.Warning = err.Error()
+				warn = u.QualifiedName + ": " + err.Error()
+			} else {
+				res.Mdl = mdl
+			}
+			outcomes[i] = describeOutcome{result: res, warning: warn}
+		}(i, u)
+	}
+	wg.Wait()
+
+	results := make([]unitResult, len(outcomes))
+	var warnings []string
+	for i, o := range outcomes {
+		results[i] = o.result
+		if o.warning != "" {
+			warnings = append(warnings, o.warning)
+		}
+	}
+	return results, warnings
 }
 
 // enumerate lists units across mxcli.DefaultUnitTypes — the "naive
