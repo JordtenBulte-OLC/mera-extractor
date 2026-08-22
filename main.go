@@ -6,12 +6,17 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"github.com/joho/godotenv"
 
 	"mera-extractor/internal/api"
 	"mera-extractor/internal/mxcli"
 )
 
 func main() {
+	if err := godotenv.Load(); err != nil {
+		log.Println("no .env file found, relying on real environment")
+	}
+
 	workRoot := os.Getenv("MERA_WORK_ROOT")
 	if workRoot == "" {
 		workRoot = os.TempDir()
