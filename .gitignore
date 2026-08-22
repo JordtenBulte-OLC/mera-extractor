@@ -1,6 +1,11 @@
 # Compiled binary (Go sometimes leaves one in the working directory)
 /mera-extractor
 /extractor
+build.log
+
+# Exclude the Mendix binaries as they are huge
+/.mx-binaries
+*.tar.gz
 
 # Never — secrets, even though the current setup keeps them outside this repo entirely
 *.env
