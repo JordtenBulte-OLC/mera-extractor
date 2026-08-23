@@ -42,14 +42,26 @@ COPY scripts/fetch-mx.sh mx-versions.txt ./
 ENV MX_FETCH_SCRATCH=/build/.mx-fetch-scratch
 ENV MX_BINARIES_DIR=/build/.mx-binaries
 
-RUN chmod +x fetch-mx.sh && set -eux; \
-    while IFS= read -r v || [ -n "$v" ]; do \
+RUN --mount=type=cache,target=/mxcache,sharing=locked \
+    set -eux; \
+    chmod +x fetch-mx.sh; \
+    while IFS= read -r v <&3 || [ -n "$v" ]; do \
       v="$(echo "$v" | sed 's/#.*//' | xargs)"; \
       [ -z "$v" ] && continue; \
-      ./fetch-mx.sh add-trimmed-version "$v"; \
-      ./fetch-mx.sh clean "$v"; \
-    done < mx-versions.txt; \
-    echo "== final /build/.mx-binaries contents =="; \
+      if [ -x "/mxcache/$v/modeler/mx" ]; then \
+        echo "== cache hit: $v =="; \
+      else \
+        echo "== building: $v =="; \
+        ./fetch-mx.sh add-trimmed-version "$v" </dev/null; \
+        ./fetch-mx.sh clean "$v" </dev/null; \
+        mkdir -p "/mxcache/$v"; \
+        cp -a "/build/.mx-binaries/$v/." "/mxcache/$v/"; \
+      fi; \
+      mkdir -p "/build/.mx-binaries/$v"; \
+      cp -a "/mxcache/$v/." "/build/.mx-binaries/$v/"; \
+    done 3< mx-versions.txt; \
+    [ -n "$(ls -A /build/.mx-binaries 2>/dev/null)" ] \
+      || { echo "mx-versions.txt produced no versions"; exit 1; }; \
     du -sh /build/.mx-binaries/*
 
 # ---------- stage 3: the actual image ----------
