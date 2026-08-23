@@ -43,7 +43,7 @@ ENV MX_FETCH_SCRATCH=/build/.mx-fetch-scratch
 ENV MX_BINARIES_DIR=/build/.mx-binaries
 
 RUN chmod +x fetch-mx.sh && set -eux; \
-    while IFS= read -r v; do \
+    while IFS= read -r v || [ -n "$v" ]; do \
       v="$(echo "$v" | sed 's/#.*//' | xargs)"; \
       [ -z "$v" ] && continue; \
       ./fetch-mx.sh add-trimmed-version "$v"; \
