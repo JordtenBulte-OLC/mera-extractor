@@ -2,6 +2,8 @@
 /mera-extractor
 /extractor
 build.log
+.local
+.ai-context
 
 # Exclude the Mendix binaries as they are huge
 /.mx-binaries
