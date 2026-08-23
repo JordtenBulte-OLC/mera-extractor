@@ -15,45 +15,125 @@ type Binary struct {
 	Path    string // .../<version>/modeler/mx
 }
 
-// Resolve does an EXACT match only — manual §1.3's "fail loudly, don't
-// fall back" rule. No nearby-version substitution.
-func Resolve(mxRoot, mendixVersion string) (Binary, error) {
-	path := filepath.Join(mxRoot, mendixVersion, "modeler", "mx")
-	info, err := os.Stat(path)
-	if err != nil || info.IsDir() {
-		return Binary{}, fmt.Errorf("mx: no binary installed for Mendix version %q under %q", mendixVersion, mxRoot)
-	}
-	return Binary{Version: mendixVersion, Path: path}, nil
-}
-
-// Highest returns the binary for whichever installed version sorts
-// numerically highest — NOT a string sort (see compareVersions).
-func Highest(mxRoot string) (Binary, error) {
+// ListVersions returns every usable mx installation under mxRoot, sorted
+// ascending by compareVersions. It is the single source of truth for "what
+// can this container actually do" — Resolve, Highest and GET /health all go
+// through it, so none of them can disagree with the others.
+//
+// That shared path is the point. /health reporting a supported version that
+// Resolve then refuses is the worst shape this can fail in: a capability
+// endpoint that lies, discovered three layers away in a 422.
+//
+// A directory qualifies only if BOTH hold:
+//
+//   - its name is version-shaped (see isVersionLike) — otherwise the stray
+//     `tmp/` staging folder left in .mx-binaries gets advertised as a
+//     supported Mendix version, and parseVersion would happily sort it as
+//     0.0.0 because it ignores Atoi errors;
+//   - <name>/modeler/mx exists and is a regular file — a half-extracted or
+//     half-trimmed version directory is not a usable version.
+//
+// An unreadable mxRoot is an error. A readable but EMPTY one is not: it
+// returns (nil, nil) so a caller can tell "misconfigured" from "nothing
+// installed yet" and report each differently.
+func ListVersions(mxRoot string) ([]Binary, error) {
 	entries, err := os.ReadDir(mxRoot)
 	if err != nil {
-		return Binary{}, fmt.Errorf("mx: reading %q: %w", mxRoot, err)
+		abs, absErr := filepath.Abs(mxRoot)
+		if absErr == nil && abs != mxRoot {
+			return nil, fmt.Errorf("mx: reading %q (resolved to %q): %w", mxRoot, abs, err)
+		}
+		return nil, fmt.Errorf("mx: reading %q: %w", mxRoot, err)
 	}
 
-	var versions []string
+	var found []Binary
 	for _, e := range entries {
-		if !e.IsDir() {
+		if !e.IsDir() || !isVersionLike(e.Name()) {
 			continue
 		}
 		path := filepath.Join(mxRoot, e.Name(), "modeler", "mx")
 		if info, err := os.Stat(path); err != nil || info.IsDir() {
 			continue
 		}
-		versions = append(versions, e.Name())
-	}
-	if len(versions) == 0 {
-		return Binary{}, fmt.Errorf("mx: no versions installed under %q", mxRoot)
+		found = append(found, Binary{Version: e.Name(), Path: path})
 	}
 
-	sort.Slice(versions, func(i, j int) bool {
-		return compareVersions(versions[i], versions[j]) < 0
+	sort.Slice(found, func(i, j int) bool {
+		return compareVersions(found[i].Version, found[j].Version) < 0
 	})
-	highest := versions[len(versions)-1]
-	return Binary{Version: highest, Path: filepath.Join(mxRoot, highest, "modeler", "mx")}, nil
+	return found, nil
+}
+
+// isVersionLike accepts names whose first two dot-separated segments are
+// plain digit runs: "11.13.0" and "11.6" yes, "tmp" and "beta.1" no.
+//
+// Deliberately stricter than parseVersion, which never fails — it discards
+// Atoi errors, so every non-numeric name silently becomes 0.0.0. That is
+// fine for ordering two known versions and wrong for deciding whether a
+// directory is a version at all.
+func isVersionLike(name string) bool {
+	parts := strings.SplitN(name, ".", 4)
+	if len(parts) < 2 {
+		return false
+	}
+	for _, p := range parts[:2] {
+		if p == "" {
+			return false
+		}
+		for _, r := range p {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// Resolve does an EXACT match only — manual §1.3's "fail loudly, don't
+// fall back" rule. No nearby-version substitution.
+//
+// It matches within ListVersions rather than stat-ing a path directly, so it
+// accepts exactly the set /health advertises. The error names what IS
+// installed, because "no binary for 11.11.0" and "no binaries at all" call
+// for very different fixes and used to look identical.
+func Resolve(mxRoot, mendixVersion string) (Binary, error) {
+	installed, err := ListVersions(mxRoot)
+	if err != nil {
+		return Binary{}, err
+	}
+	for _, b := range installed {
+		if b.Version == mendixVersion {
+			return b, nil
+		}
+	}
+	if len(installed) == 0 {
+		return Binary{}, fmt.Errorf("mx: no versions installed under %q (wanted %q)", mxRoot, mendixVersion)
+	}
+	return Binary{}, fmt.Errorf("mx: no binary installed for Mendix version %q under %q; installed: %s",
+		mendixVersion, mxRoot, strings.Join(versionStrings(installed), ", "))
+}
+
+// Highest returns the binary for whichever installed version sorts
+// numerically highest — NOT a string sort (see compareVersions).
+func Highest(mxRoot string) (Binary, error) {
+	installed, err := ListVersions(mxRoot)
+	if err != nil {
+		return Binary{}, err
+	}
+	if len(installed) == 0 {
+		return Binary{}, fmt.Errorf("mx: no versions installed under %q", mxRoot)
+	}
+	return installed[len(installed)-1], nil // ListVersions sorts ascending
+}
+
+// versionStrings is the projection /health needs, and what Resolve's error
+// text uses.
+func versionStrings(bins []Binary) []string {
+	out := make([]string, len(bins))
+	for i, b := range bins {
+		out[i] = b.Version
+	}
+	return out
 }
 
 // parsedVersion is a.b[.c[.d]] — major and minor are always present and

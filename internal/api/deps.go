@@ -27,6 +27,7 @@ type Deps struct {
 	FindMpr   func(dir string) (string, error)
 	TextDiffs func(ctx context.Context, repoDir, baseSha, headSha string, pathspecs []string) ([]gitops.TextDiff, error)
 
+	MxListVersions        func(mxRoot string) ([]mx.Binary, error)
 	MxHighest             func(mxRoot string) (mx.Binary, error)
 	MxResolve             func(mxRoot, mendixVersion string) (mx.Binary, error)
 	PrepareMpr            func(ctx context.Context, bin mx.Binary, dir string) (string, mx.AnalyzeResult, error)
@@ -54,6 +55,9 @@ func (d Deps) withDefaults() Deps {
 	}
 	if d.TextDiffs == nil {
 		d.TextDiffs = gitops.TextDiffs
+	}
+	if d.MxListVersions == nil {
+		d.MxListVersions = mx.ListVersions
 	}
 	if d.MxHighest == nil {
 		d.MxHighest = mx.Highest

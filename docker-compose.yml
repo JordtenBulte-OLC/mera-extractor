@@ -1,0 +1,98 @@
+# docker-compose.yml — local MERA extractor sidecar
+#
+#   docker compose up -d --build
+#   curl http://localhost:8081/health
+#
+# The Mendix app calls it at http://localhost:8081 when Studio Pro runs the app
+# on Windows (the normal F5 case). See the notes at the bottom for the case
+# where the Mendix app itself is containerised.
+
+services:
+  extractor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mera-extractor:local
+    container_name: mera-extractor
+
+    ports:
+      # HOST:CONTAINER — 8081 on the host deliberately.
+      # Mendix Studio Pro's local runtime already owns 8080 (runtime) and
+      # 8090 (admin). Publishing the extractor on either means the app and
+      # the sidecar fight over the port, and the loser fails in a way that
+      # looks like a networking problem rather than a conflict.
+      - "8081:8080"
+
+    environment:
+      # The service reads PORT and honours it; 8080 INSIDE the container is
+      # fine and independent of the host port above.
+      PORT: "8080"
+
+      # Set in the Dockerfile via WORKDIR, restated here so it is visible.
+      MERA_WORK_ROOT: "/work"
+
+      # Where the trimmed mx binaries live in the image. Absolute, always.
+      MERA_MX_ROOT: "/opt/mx"
+
+      # Deliberately NOT NumCPU(): inside a container with a CPU limit,
+      # runtime.NumCPU() reports the HOST's core count and overstates what
+      # this process may actually use. Keep it in step with `cpus` below.
+      MERA_MXCLI_CONCURRENCY: "8"
+
+    # NEVER put MERA_PAT here. The PAT arrives per request in the /extract
+    # body and is written to a 0600 credential file that is deleted as soon
+    # as git no longer needs it. Baking it into the container environment
+    # puts it in `docker inspect`, in compose files, and in shell history.
+
+    volumes:
+      # Clone workspaces. A named volume rather than the container filesystem
+      # so it survives a restart, can be inspected when a clone misbehaves,
+      # and can be dropped with `docker compose down -v` when it grows.
+      #
+      # /extract cleans up after itself; a standalone /clone deliberately does
+      # not (see the leased-workspace item in MERA-session-status.md §3), so
+      # this will grow if you use /clone directly.
+      - mera-work:/work
+
+    # mx is .NET and reads a whole Mendix model into memory. 2G is comfortable
+    # for a ~1,000-unit app; drop it and you get an OOM kill that surfaces as a
+    # mysteriously dead subprocess rather than a clear error.
+    mem_limit: 2g
+    cpus: 8
+
+    healthcheck:
+      # /health calls mxcli.Version, which queues behind the same global
+      # subprocess semaphore as everything else — so under a loaded extraction
+      # it can be slow to answer. That is real backpressure, not a fault, which
+      # is why the timeout here is generous and start_period is long enough to
+      # cover container boot.
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+      start_period: 30s
+
+    restart: unless-stopped
+
+volumes:
+  mera-work:
+
+# ---------------------------------------------------------------------------
+# Reaching it from Mendix
+# ---------------------------------------------------------------------------
+#
+# Studio Pro runs the app on Windows (F5)  →  http://localhost:8081
+#
+#   Docker Desktop with the WSL2 backend publishes container ports onto the
+#   WINDOWS host automatically, so no extra forwarding is needed. If you run
+#   Docker Engine inside WSL2 instead, WSL2's own localhost forwarding covers
+#   it — same URL, one more moving part.
+#
+# The Mendix app itself in a container  →  http://mera-extractor:8080
+#
+#   Put both on one compose network and use the service name with the
+#   CONTAINER port. localhost inside a container is that container.
+#
+# Neither of the above  →  http://host.docker.internal:8081
+#
+#   Only when something in a container must reach a service on the host.
