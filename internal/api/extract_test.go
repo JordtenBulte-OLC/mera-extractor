@@ -46,6 +46,7 @@ type harness struct {
 	resolveTypes   [][]string
 	cleanupCalls   []string
 	listUnitsCalls int
+	textDiffCalls  [][3]string // repoDir, baseSha, headSha
 }
 
 // newHarness wires a Server whose every external dependency is faked, and
@@ -77,7 +78,18 @@ func newHarness(t *testing.T) *harness {
 		MxRoot:   "/opt/mx",
 		Deps: Deps{
 			CloneBoth: func(ctx context.Context, workRoot string, req gitops.CloneBothRequest) (gitops.CloneBothResult, error) {
-				return gitops.CloneBothResult{WorkDir: work, BaseDir: baseDir, HeadDir: headDir}, nil
+				return gitops.CloneBothResult{
+					WorkDir: work, RepoDir: filepath.Join(work, "repo.git"),
+					BaseDir: baseDir, HeadDir: headDir,
+				}, nil
+			},
+			TextDiffs: func(ctx context.Context, repoDir, baseSha, headSha string, pathspecs []string) ([]gitops.TextDiff, error) {
+				h.mu.Lock()
+				h.textDiffCalls = append(h.textDiffCalls, [3]string{repoDir, baseSha, headSha})
+				h.mu.Unlock()
+				return []gitops.TextDiff{{
+					Path: "javasource/sales/Foo.java", ChangeKind: "Modified", UnifiedDiff: "@@ -1 +1 @@",
+				}}, nil
 			},
 			Cleanup: func(workDir string) error {
 				h.mu.Lock()
@@ -286,8 +298,11 @@ func TestExtract_ShasReachCloneBoth(t *testing.T) {
 // Version handling
 // ---------------------------------------------------------------------------
 
-func TestExtract_MigrationCommitFailsFast(t *testing.T) {
-	for _, side := range []string{"base", "head"} {
+// A Projects$ProjectConversion unit persists in the model after a Studio Pro
+// upgrade completes, so a healthy app carries one forever. This used to be a
+// 422 gate and it rejected every commit of the real test app.
+func TestExtract_ProjectConversionIsOnlyAWarning(t *testing.T) {
+	for _, side := range []string{"base", "head", "both"} {
 		t.Run(side, func(t *testing.T) {
 			h := newHarness(t)
 			var diffCalled bool
@@ -297,24 +312,73 @@ func TestExtract_MigrationCommitFailsFast(t *testing.T) {
 			}
 			h.srv.Deps.PrepareMpr = func(ctx context.Context, bin mx.Binary, dir string) (string, mx.AnalyzeResult, error) {
 				res := mx.AnalyzeResult{MendixVersion: "11.13.0"}
-				if filepath.Base(dir) == side {
+				if side == "both" || filepath.Base(dir) == side {
 					res.HasProjectConversion = true
 				}
 				return filepath.Join(dir, "MERA.mpr"), res, nil
+			}
+
+			resp := decodeExtract(t, h.postDefault())
+			if !diffCalled {
+				t.Error("the diff must still run — presence of the unit proves nothing")
+			}
+			if !hasWarning(resp, "ProjectConversion") {
+				t.Errorf("it should still be reported as a warning, got %v", resp.Warnings)
+			}
+			// One warning even when both sides carry it.
+			var n int
+			for _, warn := range resp.Warnings {
+				if strings.Contains(warn, "ProjectConversion") {
+					n++
+				}
+			}
+			if n != 1 {
+				t.Errorf("want 1 ProjectConversion warning, got %d: %v", n, resp.Warnings)
+			}
+		})
+	}
+}
+
+// The authoritative signal: mx itself failing to parse the snapshot.
+func TestExtract_UnparseableSnapshotIs422(t *testing.T) {
+	realStderr := "Expected '$ID' as the first property of a storage object, but got 'Associations'."
+
+	cases := map[string]error{
+		"exit 129":          &mx.ErrDiffFailed{Stderr: realStderr},
+		"undocumented code": &mx.ErrUnexpectedExitCode{ExitCode: 137, Stderr: realStderr},
+	}
+	for name, diffErr := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t)
+			h.srv.Deps.Diff = func(ctx context.Context, bin mx.Binary, b, hd, o string) (mx.DiffResult, error) {
+				return mx.DiffResult{}, diffErr
 			}
 			w := h.postDefault()
 			if w.Code != http.StatusUnprocessableEntity {
 				t.Fatalf("status = %d, want 422; body = %s", w.Code, w.Body.String())
 			}
 			if !strings.Contains(w.Body.String(), "migration") {
-				t.Errorf("error should name the migration case, got %s", w.Body.String())
+				t.Errorf("error should name the migration case: %s", w.Body.String())
 			}
-			// The whole point of failing fast is not reaching mx diff, where
-			// this surfaces as an opaque $ID/Associations parse exception.
-			if diffCalled {
-				t.Error("mx diff must not run on a version-migration commit")
+			if !strings.Contains(w.Body.String(), "11.13.0") {
+				t.Errorf("error should carry the detected version: %s", w.Body.String())
 			}
 		})
+	}
+}
+
+// An unrelated diff failure must not be mislabelled as a migration commit.
+func TestExtract_OtherDiffFailureIsNotAMigration(t *testing.T) {
+	h := newHarness(t)
+	h.srv.Deps.Diff = func(ctx context.Context, bin mx.Binary, b, hd, o string) (mx.DiffResult, error) {
+		return mx.DiffResult{}, &mx.ErrDiffFailed{Stderr: "some other catastrophe"}
+	}
+	w := h.postDefault()
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", w.Code)
+	}
+	if strings.Contains(w.Body.String(), "migration") {
+		t.Errorf("must not claim migration: %s", w.Body.String())
 	}
 }
 
@@ -339,6 +403,46 @@ func TestExtract_NoBinariesIsServerError(t *testing.T) {
 	}
 	if w := h.postDefault(); w.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d, want 500 — a missing binary is our misconfiguration", w.Code)
+	}
+}
+
+// A relative MxRoot resolves against the SERVER's working directory, which the
+// person reading the error cannot see. Naming both halves is what turns three
+// repeat incidents into a message that explains itself.
+func TestExtract_RelativeMxRootErrorNamesTheResolvedPath(t *testing.T) {
+	h := newHarness(t)
+	h.srv.MxRoot = "./.mx-binaries"
+	h.srv.Deps.MxHighest = func(mxRoot string) (mx.Binary, error) {
+		return mx.Binary{}, errors.New("no such file or directory")
+	}
+	// Decode rather than string-matching the raw body: JSON escapes the quotes
+	// describeMxRoot emits, so `"./.mx-binaries"` appears on the wire as
+	// \"./.mx-binaries\" and a naive Contains check fails on a correct message.
+	var payload struct {
+		Error string `json:"error"`
+	}
+	rec := h.postDefault()
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode error body: %v\n%s", err, rec.Body.String())
+	}
+
+	if !strings.Contains(payload.Error, `"./.mx-binaries"`) {
+		t.Errorf("error should quote the configured value: %s", payload.Error)
+	}
+	if !strings.Contains(payload.Error, "resolved to") {
+		t.Errorf("error should say where that actually points: %s", payload.Error)
+	}
+	cwd, _ := os.Getwd()
+	if !strings.Contains(payload.Error, filepath.Join(cwd, ".mx-binaries")) {
+		t.Errorf("resolved path should be the absolute one: %s", payload.Error)
+	}
+}
+
+func TestDescribeMxRoot_AbsolutePathStaysPlain(t *testing.T) {
+	// No point printing the same string twice when it is already absolute.
+	got := describeMxRoot("/opt/mx")
+	if got != `"/opt/mx"` {
+		t.Errorf("describeMxRoot(/opt/mx) = %s, want it unadorned", got)
 	}
 }
 
@@ -775,6 +879,52 @@ func TestTypeTablesAreCoherent(t *testing.T) {
 		if !mapped && !known {
 			t.Errorf("%q was seen in real dump-mpr output but is classified nowhere", typ)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Step 10 — textDiffs
+// ---------------------------------------------------------------------------
+
+func TestExtract_TextDiffsReachTheResponse(t *testing.T) {
+	h := newHarness(t)
+	resp := decodeExtract(t, h.postDefault())
+
+	if len(resp.TextDiffs) != 1 || resp.TextDiffs[0].Path != "javasource/sales/Foo.java" {
+		t.Fatalf("textDiffs = %+v", resp.TextDiffs)
+	}
+	// Must run against the bare repo with the request's own SHAs — not the
+	// worktree directories, and not some rev git would have to resolve.
+	want := [3]string{filepath.Join(h.workDir, "repo.git"), "aaaaaaa", "bbbbbbb"}
+	if len(h.textDiffCalls) != 1 || h.textDiffCalls[0] != want {
+		t.Errorf("TextDiffs called with %v, want [%v]", h.textDiffCalls, want)
+	}
+}
+
+func TestExtract_TextDiffFailureIsOnlyAWarning(t *testing.T) {
+	h := newHarness(t)
+	h.srv.Deps.TextDiffs = func(ctx context.Context, repoDir, b, hd string, p []string) ([]gitops.TextDiff, error) {
+		return nil, errors.New("git exploded")
+	}
+	// The mx half of the extraction is independent of the text half; losing
+	// one must not lose the other.
+	h.setDiff(mx.UnitDifference{Type: "Microflows$Microflow", ID: "m", Change: "Added"})
+	h.setNames(nil, map[string]mx.ResolvedUnit{"m": mf("m", "Sales.ACT_X")})
+
+	resp := decodeExtract(t, h.postDefault())
+	if !hasWarning(resp, "git exploded") {
+		t.Errorf("warnings = %v", resp.Warnings)
+	}
+	if findUnit(t, resp, "Sales.ACT_X").AfterMdl == "" {
+		t.Error("a text-diff failure must not cost the model-side results")
+	}
+}
+
+func TestExtract_EscapeHatchSkipsTextDiffs(t *testing.T) {
+	h := newHarness(t)
+	h.post(`{"repoUrl":"https://git.example/x.git","baseSha":"aaaaaaa","headSha":"bbbbbbb","modules":["Sales"]}`)
+	if len(h.textDiffCalls) != 0 {
+		t.Errorf("the legacy path has no textDiffs field to fill, got %v", h.textDiffCalls)
 	}
 }
 

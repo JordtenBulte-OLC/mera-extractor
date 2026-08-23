@@ -65,12 +65,6 @@ type changeUnit struct {
 	TokenEstimate   int             `json:"tokenEstimate"`
 }
 
-type textDiff struct {
-	Path        string `json:"path"`
-	ChangeKind  string `json:"changeKind"`
-	UnifiedDiff string `json:"unifiedDiff"`
-}
-
 type extractResponse struct {
 	RequestID string `json:"requestId,omitempty"`
 
@@ -79,9 +73,9 @@ type extractResponse struct {
 	MxcliVersion  string `json:"mxcliVersion,omitempty"`
 	MxVersion     string `json:"mxVersion,omitempty"`
 
-	ChangeUnits []changeUnit `json:"changeUnits"`
-	TextDiffs   []textDiff   `json:"textDiffs,omitempty"` // Step 10; always empty for now
-	Warnings    []string     `json:"warnings,omitempty"`
+	ChangeUnits []changeUnit      `json:"changeUnits"`
+	TextDiffs   []gitops.TextDiff `json:"textDiffs,omitempty"`
+	Warnings    []string          `json:"warnings,omitempty"`
 }
 
 // legacyExtractResponse is the pre-Stage-8 shape, kept byte-identical for the
@@ -108,11 +102,23 @@ type unitResult struct {
 // each unitDifference's `type` — onto the singular unit types that
 // `mxcli describe` accepts (v0.19.0's list).
 //
-// The two tools share a vocabulary: `mx dump-mpr`'s `$Type` and `mx diff`'s
-// `type` produce identical strings, which is why the keys below could be read
-// straight off a real dump. "Microflows$Microflow" and "Images$ImageCollection"
-// appear in BOTH a real diff and a real dump, which is the direct evidence for
-// that claim.
+// THERE ARE TWO VOCABULARIES, and which one `mx diff` speaks is NOT yet known.
+//
+//	mx dump-mpr says   Pages$Page   Pages$Snippet   (and no Layout/BuildingBlock
+//	                                                 in the trimmed fixture)
+//	mx analyze-mpr says Forms$Page  Forms$Snippet   Forms$Layout  Forms$BuildingBlock
+//
+// analyze-mpr appears to report STORAGE-level names, dump-mpr the current
+// public metamodel names; Mendix evidently renamed the Forms namespace to Pages
+// at some point without changing what is on disk. Most types are spelled
+// identically in both (Microflows$Microflow, Images$ImageCollection,
+// JavaActions$JavaAction, DomainModels$DomainModel, Projects$Folder…).
+//
+// An earlier revision of this comment claimed the two tools share one
+// vocabulary, citing Microflows$Microflow and Images$ImageCollection appearing
+// in both a real diff and a real dump. That evidence was worthless: those are
+// exactly the types where the vocabularies agree, so they cannot discriminate.
+// Until a real diff reports a page, BOTH spellings are mapped.
 //
 // Completeness is not required for correctness. A type that is neither here nor
 // in knownNotDescribable produces exactly one warning naming the string mx
@@ -122,10 +128,17 @@ var diffTypeToMxcli = map[string]string{
 	// CONFIRMED — observed as a top-level unit in real dump-mpr output
 	// (internal/mx/testdata/dump-reviewmanagement-trim.json) and matched to a
 	// real `mxcli describe` type.
-	"Microflows$Microflow":         "microflow",
-	"Pages$Page":                   "page",
-	"Pages$Snippet":                "snippet",
-	"Constants$Constant":           "constant",
+	"Microflows$Microflow": "microflow",
+	"Pages$Page":           "page",
+	"Pages$Snippet":        "snippet",
+	"Constants$Constant":   "constant",
+	// The SAME units, spelled the way `mx analyze-mpr` reports them. See the
+	// "two vocabularies" note above the map — which spelling mx diff uses is
+	// not yet known, so both are mapped. A key that never matches costs nothing.
+	"Forms$Page":                   "page",
+	"Forms$Snippet":                "snippet",
+	"Forms$Layout":                 "layout",
+	"Forms$BuildingBlock":          "buildingblock",
 	"Enumerations$Enumeration":     "enumeration",
 	"JavaActions$JavaAction":       "javaaction",
 	"JsonStructures$JsonStructure": "jsonstructure",
@@ -147,11 +160,16 @@ var diffTypeToMxcli = map[string]string{
 	"DomainModels$CrossAssociation": "association",
 	"Security$ModuleRole":           "modulerole",
 
+	// CONFIRMED by analyze-mpr's unit-type inventory on a real app (16 units).
+	// This was an UNVERIFIED guess and turned out right.
+	"Microflows$Nanoflow": "nanoflow",
+
 	// UNVERIFIED — the namespace is inferred from the confirmed naming pattern
 	// (<PluralNamespace>$<TypeName>), the mxcli type is from its own --help.
 	// A wrong key never matches and costs nothing; a wrong value degrades to a
 	// per-unit describe warning. Confirm and drop the marker, or delete.
-	"Microflows$Nanoflow": "nanoflow",
+	// Pages$Layout / Pages$BuildingBlock are the dump-mpr-vocabulary twins of
+	// the confirmed Forms$ spellings above; one pair of them is dead weight.
 	"Workflows$Workflow":  "workflow",
 	"Pages$Layout":        "layout",
 	"Pages$BuildingBlock": "buildingblock",
@@ -177,54 +195,19 @@ var knownNotDescribable = map[string]string{
 	// The individual changed units are reported separately anyway.
 	"Projects$Module": "mxcli `module` would render the whole module's contents",
 
-	"Projects$Folder":          "folders have no mxcli describe type",
-	"Projects$ModuleSettings":  "mxcli `settings` is project-level, not module-level",
-	"DomainModels$DomainModel": "no mxcli describe type; entity and association changes are reported as their own units",
-	"Security$ModuleSecurity":  "no mxcli describe type; `modulerole` covers the roles individually",
+	"Projects$Folder": "folders have no mxcli describe type",
+
+	// Confirmed present in a real app via analyze-mpr's unit-type inventory,
+	// and absent from `mxcli describe --help`.
+	"Projects$ProjectConversion":         "a record of a past Studio Pro upgrade; nothing to review",
+	"Forms$PageTemplate":                 "no mxcli describe type",
+	"JavaScriptActions$JavaScriptAction": "mxcli has no javascriptaction type",
+	"CustomIcons$CustomIconCollection":   "no mxcli describe type",
+	"Texts$SystemTextCollection":         "no mxcli describe type",
+	"Projects$ModuleSettings":            "mxcli `settings` is project-level, not module-level",
+	"DomainModels$DomainModel":           "no mxcli describe type; entity and association changes are reported as their own units",
+	"Security$ModuleSecurity":            "no mxcli describe type; `modulerole` covers the roles individually",
 }
-
-// output for mxcli describe --help (v0.19.0). Use to extend diffTypeToMxcli map when combined with the outcome of mx diff output
-
-// Types:
-//   module           Describe a module (all contents)
-//   entity           Describe an entity
-//   externalentity   Describe an external entity (alias for entity)
-//   association      Describe an association
-//   enumeration      Describe an enumeration
-//   constant         Describe a constant
-//   microflow        Describe a microflow
-//   nanoflow         Describe a nanoflow
-//   workflow         Describe a workflow
-//   page             Describe a page
-//   snippet          Describe a snippet
-//   buildingblock    Describe a building block (read-only, also: "building block")
-//   layout           Describe a layout
-//   javaaction       Describe a java action
-//   jsonstructure    Describe a JSON structure (also: "json structure")
-//   importmapping    Describe an import mapping (also: "import mapping")
-//   exportmapping    Describe an export mapping (also: "export mapping")
-//   restclient       Describe a consumed REST service (also: "rest client")
-//   odataclient      Describe a consumed OData service
-//   odataservice     Describe a published OData service
-//   imagecollection  Describe an image collection (also: "image collection")
-//   menu             Describe a standalone menu document
-//   queue            Describe a task queue
-//   scheduledevent   Describe a scheduled event (also: "scheduled event")
-//   regularexpression  Describe a regular expression (also: "regular expression")
-//   businesseventservice  Describe a business event service (also: "business event service")
-//   databaseconnection    Describe a database connection (also: "database connection")
-//   agent            Describe an AI agent (also: "agent")
-//   aimodel          Describe an AI model (also: "model", "ai model")
-//   knowledgebase    Describe a knowledge base (also: "knowledge base")
-//   consumedmcpservice  Describe a consumed MCP service (also: "consumed mcp service")
-//   datatransformer  Describe a data transformer (also: "data transformer")
-//   modulerole       Describe a module role
-//   userrole         Describe a user role
-//   projectsecurity  Show project security settings
-//   settings         Describe project settings
-//   demouser         Describe a demo user
-//   navigation       Describe a navigation profile
-//   systemoverview   Module dependency graph (requires --format elk)
 
 // ---------------------------------------------------------------------------
 // Handler
@@ -281,7 +264,8 @@ func (s *Server) extractDiff(ctx context.Context, w http.ResponseWriter, d Deps,
 	// installed under MxRoot), not a bad request.
 	boot, err := d.MxHighest(s.MxRoot)
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, fmt.Errorf("no usable mx binary under %q: %w", s.MxRoot, err))
+		respondError(w, http.StatusInternalServerError,
+			fmt.Errorf("no usable mx binary under %s: %w", describeMxRoot(s.MxRoot), err))
 		return
 	}
 
@@ -296,18 +280,15 @@ func (s *Server) extractDiff(ctx context.Context, w http.ResponseWriter, d Deps,
 		return
 	}
 
-	// Fail fast on a version-migration commit rather than letting a raw
-	// "$ID"/"Associations" parse exception surface out of diff or dump-mpr.
-	// Either side is disqualifying: mx cannot parse the snapshot at all.
-	if headInfo.HasProjectConversion {
-		respondError(w, http.StatusUnprocessableEntity,
-			&mx.ErrUnsupportedVersionMigrationCommit{MendixVersion: headInfo.MendixVersion})
-		return
-	}
-	if baseInfo.HasProjectConversion {
-		respondError(w, http.StatusUnprocessableEntity,
-			&mx.ErrUnsupportedVersionMigrationCommit{MendixVersion: baseInfo.MendixVersion})
-		return
+	// A Projects$ProjectConversion unit is NOT a reason to refuse the commit.
+	// It persists in the model after a Studio Pro upgrade completes — a healthy
+	// app that has ever been upgraded carries one forever, and diffs fine. This
+	// was a 422 gate until a real run rejected every commit of the test app;
+	// see mx.ErrUnsupportedVersionMigrationCommit for the full story. The
+	// authoritative signal is mx actually failing to parse, handled at Diff below.
+	if headInfo.HasProjectConversion || baseInfo.HasProjectConversion {
+		warnings = append(warnings, "a Projects$ProjectConversion unit is present "+
+			"(a record of a past Studio Pro upgrade); proceeding")
 	}
 
 	// The head is what's under review, so its version selects the binary.
@@ -323,12 +304,21 @@ func (s *Server) extractDiff(ctx context.Context, w http.ResponseWriter, d Deps,
 	if err != nil {
 		// manual §1.3: fail loudly, never substitute a nearby version.
 		respondError(w, http.StatusUnprocessableEntity,
-			fmt.Errorf("unsupportedMendixVersion %s: %w", headInfo.MendixVersion, err))
+			fmt.Errorf("unsupportedMendixVersion %s under %s: %w",
+				headInfo.MendixVersion, describeMxRoot(s.MxRoot), err))
 		return
 	}
 
 	diff, err := d.Diff(ctx, bin, baseMpr, headMpr, filepath.Join(clone.WorkDir, "diff.json"))
 	if err != nil {
+		// THIS is where a genuine mid-migration snapshot is caught: mx cannot
+		// parse it and says so. Detecting on the failure rather than predicting
+		// it from analyze-mpr keeps the clean error message without rejecting
+		// commits that would have worked.
+		if mig := asVersionMigrationFailure(err, headInfo.MendixVersion); mig != nil {
+			respondError(w, http.StatusUnprocessableEntity, mig)
+			return
+		}
 		respondError(w, diffErrorStatus(err), err)
 		return
 	}
@@ -345,6 +335,16 @@ func (s *Server) extractDiff(ctx context.Context, w http.ResponseWriter, d Deps,
 
 	units, describeWarnings := describeChangeUnits(ctx, d, baseMpr, headMpr, plans)
 	warnings = append(warnings, describeWarnings...)
+
+	// Step 10 — the non-model half of the commit: javasource, theme,
+	// deployment and loose .json. Runs against the bare repo, which needs no
+	// working tree and no credentials: both worktrees were checked out, so
+	// every blob either side is already local despite the blob:none filter.
+	// Cleanly separable from the mx path, so a failure here is a warning.
+	textDiffs, err := d.TextDiffs(ctx, clone.RepoDir, req.BaseSha, req.HeadSha, nil)
+	if err != nil {
+		warnings = append(warnings, "could not compute text diffs: "+err.Error())
+	}
 
 	// Provenance. A failure to read the mxcli version must not sink an
 	// otherwise good extraction.
@@ -363,6 +363,7 @@ func (s *Server) extractDiff(ctx context.Context, w http.ResponseWriter, d Deps,
 		MxcliVersion:  mxcliVer,
 		MxVersion:     bin.Version,
 		ChangeUnits:   units,
+		TextDiffs:     textDiffs,
 		Warnings:      warnings,
 	})
 }
@@ -395,6 +396,49 @@ func (s *Server) extractNaive(ctx context.Context, w http.ResponseWriter, d Deps
 		Units:    unitResults,
 		Warnings: warnings,
 	})
+}
+
+// describeMxRoot renders MxRoot for an error message, adding what it actually
+// resolves to on disk when the configured value is relative.
+//
+// MERA_MX_ROOT has now caused three separate incidents — "/.mx-binaries" (an
+// absolute path at the filesystem root rather than one in the working
+// directory), a root one level too shallow to contain <version>/modeler/mx,
+// and "./.mx-binaries" read against a working directory that was not the one
+// the author had in mind. All three produce an error naming a path that looks
+// correct to the person reading it. Resolving it makes the message
+// self-diagnosing: the reader sees where the process actually looked.
+//
+// Note this resolves against the SERVER's working directory, which is the
+// point — that is the thing the reader cannot see and is guessing at.
+func describeMxRoot(mxRoot string) string {
+	abs, err := filepath.Abs(mxRoot)
+	if err != nil || abs == mxRoot {
+		return fmt.Sprintf("%q", mxRoot)
+	}
+	return fmt.Sprintf("%q (resolved to %q)", mxRoot, abs)
+}
+
+// asVersionMigrationFailure returns a typed migration error if err carries mx's
+// unreadable-snapshot parse exception, or nil if it is some other failure.
+//
+// Both of mx diff's stderr-bearing error types are checked: the documented
+// exit-129 case and the outside-the-table case, because this project has
+// already found this CLI family's exit codes unreliable once.
+func asVersionMigrationFailure(err error, mendixVersion string) error {
+	var stderr string
+	var failed *mx.ErrDiffFailed
+	var unexpected *mx.ErrUnexpectedExitCode
+	switch {
+	case errors.As(err, &failed):
+		stderr = failed.Stderr
+	case errors.As(err, &unexpected):
+		stderr = unexpected.Stderr
+	}
+	if mx.IsVersionMigrationFailure(stderr) {
+		return &mx.ErrUnsupportedVersionMigrationCommit{MendixVersion: mendixVersion}
+	}
+	return nil
 }
 
 // diffErrorStatus maps mx diff's typed errors onto HTTP status codes.

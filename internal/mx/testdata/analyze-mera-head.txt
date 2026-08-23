@@ -1,0 +1,114 @@
+MPR File Analysis
+----------------------------------------------------------------------------------------------------------------------------
+            MPR File: /home/jordt/mera/mera-repo/MERA.mpr
+        Size on disk: 151,552 bytes
+      Mendix version: 11.13.0
+     Number of units: 1,037
+
+BSON contents
+----------------------------------------------------------------------------------------------------------------------------
+                                            IDs (model data) |    2,013,732 bytes | 1,328.74% of MPR |       95,892 occurrences
+                               Primitive values (model data) |   10,711,255 bytes | 7,067.71% of MPR |      403,742 occurrences
+                             Objects and arrays (model data) |    2,492,484 bytes | 1,644.64% of MPR |      182,738 occurrences
+                                       Subtotal (model data) |   15,217,471 bytes | 10,041.09% of MPR | 
+                                       Type names (metadata) |    2,781,510 bytes | 1,835.35% of MPR |       95,892 occurrences
+                                   Property names (metadata) |    8,482,219 bytes | 5,596.90% of MPR |      816,869 occurrences
+                                         Subtotal (metadata) |   11,263,729 bytes | 7,432.25% of MPR | 
+                                      Total of all BSON data |   26,481,200 bytes | 17,473.34% of MPR | 
+
+Content categories
+----------------------------------------------------------------------------------------------------------------------------
+                                           Marketplace units |   21,128,231 bytes | 13,941.24% of MPR |          868 occurrences
+                                          Excluded documents |      190,129 bytes | 125.45% of MPR |            9 occurrences
+                                                     Strings |    3,047,800 bytes | 2,011.06% of MPR |      263,962 occurrences
+                                Big Strings (>= 1,000 bytes) |       26,876 bytes | 17.73% of MPR |           15 occurrences
+                                                       BLOBs |    6,973,429 bytes | 4,601.34% of MPR |        1,725 occurrences
+                                  Big BLOBs (>= 1,000 bytes) |    6,915,451 bytes | 4,563.09% of MPR |          495 occurrences
+
+Size by unit type
+----------------------------------------------------------------------------------------------------------------------------
+                                                  Forms$Page |    7,280,009 bytes | 4,803.64% of MPR |           55 occurrences
+                                          Forms$PageTemplate |    5,644,773 bytes | 3,724.64% of MPR |           47 occurrences
+                                      Images$ImageCollection |    4,163,958 bytes | 2,747.54% of MPR |           10 occurrences
+                                         Forms$BuildingBlock |    2,991,936 bytes | 1,974.20% of MPR |           55 occurrences
+                                        Microflows$Microflow |    2,752,404 bytes | 1,816.14% of MPR |          242 occurrences
+                                               Forms$Snippet |    1,017,348 bytes | 671.29% of MPR |           18 occurrences
+                          JavaScriptActions$JavaScriptAction |      717,961 bytes | 473.74% of MPR |           72 occurrences
+                                      JavaActions$JavaAction |      519,918 bytes | 343.06% of MPR |          141 occurrences
+                                    DomainModels$DomainModel |      408,315 bytes | 269.42% of MPR |           16 occurrences
+                                                Forms$Layout |      275,898 bytes | 182.05% of MPR |           25 occurrences
+                            CustomIcons$CustomIconCollection |      253,795 bytes | 167.46% of MPR |            3 occurrences
+                                         Microflows$Nanoflow |      134,361 bytes | 88.66% of MPR |           16 occurrences
+                                JsonStructures$JsonStructure |       86,321 bytes | 56.96% of MPR |            6 occurrences
+                                  Texts$SystemTextCollection |       57,322 bytes | 37.82% of MPR |            1 occurrences
+                                    Enumerations$Enumeration |       47,875 bytes | 31.59% of MPR |           35 occurrences
+                                ImportMappings$ImportMapping |       23,473 bytes | 15.49% of MPR |            6 occurrences
+                                ExportMappings$ExportMapping |       17,101 bytes | 11.28% of MPR |            4 occurrences
+                                             Projects$Folder |       15,826 bytes | 10.44% of MPR |          200 occurrences
+                                  Projects$ProjectConversion |       14,110 bytes |  9.31% of MPR |            1 occurrences
+                                     Projects$ModuleSettings |       10,361 bytes |  6.84% of MPR |           16 occurrences
+
+Size by property
+----------------------------------------------------------------------------------------------------------------------------
+                                          Images$Image.Image |    4,155,668 bytes | 2,742.07% of MPR |           59 occurrences
+                                Forms$PageTemplate.ImageData |      897,224 bytes | 592.02% of MPR |           47 occurrences
+               CodeActions$MicroflowActionInfo.ImageDataDark |      546,417 bytes | 360.55% of MPR |          160 occurrences
+                   CodeActions$MicroflowActionInfo.ImageData |      468,208 bytes | 308.94% of MPR |          160 occurrences
+                               Forms$BuildingBlock.ImageData |      414,625 bytes | 273.59% of MPR |           55 occurrences
+                CustomWidgets$WidgetPropertyType.Description |      235,725 bytes | 155.54% of MPR |        7,907 occurrences
+                    CustomWidgets$WidgetProperty.TypePointer |      194,817 bytes | 128.55% of MPR |        9,277 occurrences
+                       CustomWidgets$WidgetValue.TypePointer |      194,817 bytes | 128.55% of MPR |        9,277 occurrences
+                   CustomWidgets$WidgetPropertyType.Category |      191,241 bytes | 126.19% of MPR |        7,907 occurrences
+                    CodeActions$MicroflowActionInfo.IconData |      179,827 bytes | 118.66% of MPR |          160 occurrences
+                CodeActions$MicroflowActionInfo.IconDataDark |      160,736 bytes | 106.06% of MPR |          160 occurrences
+                CustomWidgets$WidgetPropertyType.PropertyKey |      153,988 bytes | 101.61% of MPR |        7,907 occurrences
+                    CustomWidgets$WidgetPropertyType.Caption |      148,137 bytes | 97.75% of MPR |        7,907 occurrences
+                   CustomIcons$CustomIconCollection.FontData |      133,031 bytes | 87.78% of MPR |            3 occurrences
+                          CustomWidgets$WidgetValueType.Type |      111,507 bytes | 73.58% of MPR |        7,907 occurrences
+                                      Texts$Translation.Text |       85,844 bytes | 56.64% of MPR |        3,286 occurrences
+                         CustomWidgets$WidgetValue.Selection |       83,577 bytes | 55.15% of MPR |        9,277 occurrences
+                   CustomWidgets$WidgetValueType.DefaultType |       71,179 bytes | 46.97% of MPR |        7,907 occurrences
+                      CustomWidgets$WidgetValueType.PathType |       71,163 bytes | 46.96% of MPR |        7,907 occurrences
+                    CustomWidgets$WidgetValue.PrimitiveValue |       67,816 bytes | 44.75% of MPR |        9,277 occurrences
+
+Size by unit
+----------------------------------------------------------------------------------------------------------------------------
+      (ImageCollection) 6fceca32-82a1-40b4-8c32-1e38e11b5298 |    3,353,725 bytes | 2,212.92% of MPR | 
+              (Snippet) 018e37fc-9aa7-42be-a1b3-8a26d8ca2024 |      531,616 bytes | 350.78% of MPR | 
+                 (Page) 468ddf8c-a685-43a6-96fe-3fdad5d2e193 |      489,579 bytes | 323.04% of MPR | 
+                 (Page) a6264eb3-c68b-4613-be45-7636b388b096 |      413,630 bytes | 272.93% of MPR | 
+                 (Page) 872d9a7e-4684-47fc-a1ff-367bf366ceb8 |      371,311 bytes | 245.01% of MPR | 
+                 (Page) 7ce9d89e-43c4-490c-b6a4-0d9f1d2468bd |      342,330 bytes | 225.88% of MPR | 
+         (PageTemplate) d05c0e29-6724-4c9d-97b1-3c1cdfcd2340 |      333,034 bytes | 219.75% of MPR | 
+         (PageTemplate) 4f6561cf-0354-4894-9f19-20be5b015ed5 |      312,171 bytes | 205.98% of MPR | 
+                 (Page) 776f2553-8673-4559-8f7f-6c969bd10efa |      297,136 bytes | 196.06% of MPR | 
+                 (Page) 01b0072a-bc38-4808-8835-3c2369121a70 |      296,347 bytes | 195.54% of MPR | 
+                 (Page) c7acbf04-1da6-40fa-8f7e-27c588c767a4 |      294,222 bytes | 194.14% of MPR | 
+                 (Page) f1ae146c-76f6-464d-9be8-a51ec29f174d |      291,580 bytes | 192.40% of MPR | 
+      (ImageCollection) 652106e9-3f38-46c7-bcc4-2b4e4ad39160 |      291,197 bytes | 192.14% of MPR | 
+         (PageTemplate) 9f2a9cef-6132-4041-9365-8b533f8d48fc |      272,007 bytes | 179.48% of MPR | 
+         (PageTemplate) 0bbdc731-095e-46c1-8ef8-aeb391c055ad |      260,891 bytes | 172.15% of MPR | 
+      (ImageCollection) e24fd161-224f-4b65-b555-3392d0a6af3f |      252,388 bytes | 166.54% of MPR | 
+         (PageTemplate) ab56b2ee-3c0b-494d-877f-70ce8b727f91 |      245,252 bytes | 161.83% of MPR | 
+         (PageTemplate) eb062b1a-4963-409f-8a9b-26f32da38abd |      242,049 bytes | 159.71% of MPR | 
+                 (Page) 2ed34450-ab1d-43a2-92da-fd073ecbd08f |      236,136 bytes | 155.81% of MPR | 
+        (BuildingBlock) 0ebe5c26-2066-4eb6-9674-134678015491 |      230,354 bytes | 152.00% of MPR | 
+
+Size by module
+----------------------------------------------------------------------------------------------------------------------------
+                             [Marketplace] Atlas_Web_Content |   11,966,707 bytes | 7,896.11% of MPR |          148 occurrences
+                                            ReviewManagement |    2,563,867 bytes | 1,691.74% of MPR |           90 occurrences
+                                     [Marketplace] MCPClient |    2,075,099 bytes | 1,369.23% of MPR |           83 occurrences
+                                [Marketplace] Administration |    2,033,340 bytes | 1,341.68% of MPR |           28 occurrences
+                                  [Marketplace] GenAICommons |    1,495,609 bytes | 986.86% of MPR |          213 occurrences
+                                               KeyManagement |    1,337,139 bytes | 882.30% of MPR |           24 occurrences
+                                       AzureDevOpsManagement |    1,041,706 bytes | 687.36% of MPR |           29 occurrences
+                                    [Marketplace] Atlas_Core |      961,734 bytes | 634.59% of MPR |           51 occurrences
+                                [Marketplace] FeedbackModule |      871,822 bytes | 575.26% of MPR |           72 occurrences
+                                    [Marketplace] Encryption |      765,692 bytes | 505.23% of MPR |           61 occurrences
+                               [Marketplace] NanoflowCommons |      609,205 bytes | 401.98% of MPR |           59 occurrences
+                                   ApplicationAdministration |      299,460 bytes | 197.60% of MPR |            8 occurrences
+                              [Marketplace] CommunityCommons |      184,680 bytes | 121.86% of MPR |          128 occurrences
+                                    [Marketplace] WebActions |      112,766 bytes | 74.41% of MPR |           14 occurrences
+                                   [Marketplace] DataWidgets |       51,577 bytes | 34.03% of MPR |           11 occurrences
+                                              MxCliExtractor |       27,197 bytes | 17.95% of MPR |           12 occurrences

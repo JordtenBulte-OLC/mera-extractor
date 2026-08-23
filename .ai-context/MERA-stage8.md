@@ -1,34 +1,54 @@
 # Stage 8 — Real change detection with `mx diff`
 
-**The active build document.** Replaces the naive full-enumeration `/extract` with real `mx diff`-driven change detection. Merges what were previously `MERA-stage8-plan.md` (design) and `MERA-stage8-checklist.md` (status) — they had started to contradict each other, and one of the plan's stated assumptions turned out to be false against real data (see §2, `$QualifiedName` on nested nodes).
+**COMPLETE.** Steps 1–12 built, unit-tested and verified end to end against the real Mendix Team Server repo on 2026-08-23. `/extract` no longer enumerates the whole app: it clones two commits, diffs them with `mx diff`, resolves each changed unit's qualified name, and renders MDL for only what changed.
 
-**Progress: Steps 1–6 built and tested. Steps 7–12 remain.** Step 6 is the first part of Stage 8 verified against the real Team Server repo, not just against stubs and captured fixtures; the `mx`-side integration runs in §6 are still outstanding.
+This doc is now the durable record of *how Stage 8 was built and what was learned proving it*. Code-level design reasoning lives in `MERA-extractor-design-notes.md` §5–§6; the repo holds the code.
 
-**Read before writing code:** `MERA-redesign-architecture.md` §2 (the `.mpr` problem and the `ChangeUnit` contract) and `MERA-implementation-manual.md` §1.3–§1.5 (version matrix, the frozen REST contract, the 14-step extraction algorithm). This doc is orientation, not a substitute.
+**Read before touching this area:** `MERA-redesign-architecture.md` §2 (the `.mpr` problem and the `ChangeUnit` contract) and `MERA-implementation-manual.md` §1.3–§1.5 (version matrix, the frozen REST contract, the 14-step extraction algorithm).
 
-**Package boundary:** `internal/mx` wraps the official `mx`/`mxbuild` binaries (version selection, `diff`, `dump-mpr`, `analyze-mpr`). `internal/mxcli` wraps the community `mxcli` tool (`describe`, `show`/`list`). Two different binaries, two packages, each named for the binary it fronts. Keep them separate — see `MERA-extractor-design-notes.md` §1.
-
----
-
-## 1. What Stage 8 actually changes
-
-The current `/extract` renders *every* unit in the app (or in named modules) because there was no way to know what changed. That stand-in did its job — it unblocked the whole agent side of the project — and this stage retires it.
-
-- **REST contract** moves from a single `sha` to `baseSha`/`headSha`, and from a flat `unitResult[]` to real `ChangeUnit[]` (manual §1.4's frozen shape). This is most of what Stage 8 *is*, code-wise.
-- **`gitops.Clone` checks out one SHA**; diffing needs both. One clone, two `git worktree add` calls — a real change to `gitops`'s contract, not just the API layer.
-- **Only changed units get described**, before and after, instead of all 608. That's the performance and cost win on top of the correctness win.
-- **Version detection has to happen before `mx diff` runs**, so the right `/opt/mx/<version>/modeler/mx` is selected — and fail loudly on no match rather than falling back to the newest and hoping.
-- **Stage 7's global concurrency cap already covers the fan-out.** No new concurrency design needed; just fewer, more targeted units flowing through the same pattern.
+**Package boundary:** `internal/mx` wraps the official `mx`/`mxbuild` binaries (version selection, `diff`, `dump-mpr`, `analyze-mpr`). `internal/mxcli` wraps the community `mxcli` tool (`describe`, `show`/`list`). Two different binaries, two packages, each named for the binary it fronts. Never fold one into the other.
 
 ---
 
-## 2. Confirmed facts about `mx` / `dump-mpr`
+## 1. The proving run
 
-Durable reference. Every item below was confirmed against real output or real `--help`, not inferred from docs.
+`go test ./... -count=1 -v -run Integration` with the real PAT and the image-add-plus-microflow commit pair:
 
-**`mx diff` gives you a GUID, not a name.** Its output shape is `{"base", "mine", "unitDifferences": [{type, id, change, containerId, containmentName}]}` — no qualified name anywhere. `mxcli describe` needs `Module.Name`.
+```
+mendixVersion="11.13.0" mxVersion="11.13.0"
+2 change units
+diff types seen (units / named / with MDL / synthesized name):
+    Images$ImageCollection    1 / 1 / 1 / 0
+    Microflows$Microflow      1 / 1 / 1 / 0
+2/2 units named, 2 rendered MDL
+expected unit MxCliExtractor.ACT_Test_newMicroflow: changeKind=Added mdl=231 bytes
+0 text diffs
+WARNING: a Projects$ProjectConversion unit is present (a record of a past
+         Studio Pro upgrade); proceeding
+--- PASS: TestExtract_Integration (35.37s)
+--- PASS: TestExtract_IntegrationEscapeHatch (13.73s)   19 units from Administration, head worktree
+--- PASS: TestCloneBoth_Integration (13.13s)            both worktrees, 151,552-byte .mpr each
+```
 
-**`mx dump-mpr` resolves it in one step.** Objects carry `$ID` alongside `$QualifiedName`, already in `Module.Name` shape; `Module` is everything before the first `.`. No cross-referencing against `mxcli`'s own listing is needed — both sides come from the same official tool family.
+What that confirms: two commits materialise as worktrees; version detection selects the matching binary; `mx diff` produces real unit differences; `dump-mpr` resolves both GUIDs to qualified names with no synthesis needed; targeted describe renders real MDL for both; the escape hatch still enumerates naively against head; and the `Projects$ProjectConversion` fix lets a healthy app through.
+
+**Two change units, not 1,037.** That is the whole point of the stage.
+
+### Still unproven after this run
+
+- **`Forms$` vs `Pages$` is unresolved.** This commit pair contained no page, snippet, layout or building block, so the one question that discriminates between the two vocabularies went untested. See §4.
+- **`textDiffs` returned 0, correctly** — the pair touches no `javasource`, `theme`, `deployment` or `*.json`. Step 10's code is fully unit-tested against a local fixture repo but has never produced a non-empty result from the real repo. Needs a commit pair with a Java change.
+- **`mxcliVersion` comes back as `"mxcli version v0.19.0 (2026-08-21T13:13:26Z)\n"`** — prose prefix, build timestamp, trailing newline. Manual §1.4 wants a bare `"v0.19.0"`. Cosmetic, but it is a provenance field that something downstream will parse. Fix belongs in `mxcli.Version`, not at the call site.
+
+---
+
+## 2. Confirmed facts about `mx` / `dump-mpr` / `analyze-mpr`
+
+Durable reference. Every item was confirmed against real output, not inferred from documentation.
+
+**`mx diff` gives you a GUID, not a name.** Output shape is `{"base", "mine", "unitDifferences": [{type, id, change, containerId, containmentName}]}`. `mxcli describe` needs `Module.Name`.
+
+**`mx dump-mpr` resolves it in one step.** Objects carry `$ID` alongside `$QualifiedName`, already in `Module.Name` shape; `Module` is everything before the first `.`.
 
 **`--output-file` is a real flag; `dump-mpr` does NOT take a bare positional output path.** Omitting it dumps the entire JSON to stdout — that's the "huge wall of text, empty file" symptom.
 
@@ -38,9 +58,11 @@ Durable reference. Every item below was confirmed against real output or real `-
 
 **Both `mx diff` and `dump-mpr` write output files with a UTF-8 BOM** (`ef bb bf` before the `{`), confirmed by hexdump. `encoding/json` refuses to parse that. `stripBOM` is applied in every read path — this is a .NET binary, so assume the BOM everywhere.
 
-**Nested objects DO carry `$QualifiedName`** — the original plan claimed only top-level document objects did, and that was wrong. `DomainModels$Attribute`, `DomainModels$Association`, `Enumerations$EnumerationValue`, `Pages$PageParameter`, `JavaActions$JavaActionParameter`, `Microflows$MicroflowParameterObject`, `Security$ModuleRole` all carry both fields at depth. The code was always right (the recursion never stopped at depth 1); only the explanatory comment was misleading.
+**Nested objects DO carry `$QualifiedName`.** `DomainModels$Attribute`, `DomainModels$Association`, `Enumerations$EnumerationValue`, `Pages$PageParameter`, `JavaActions$JavaActionParameter`, `Microflows$MicroflowParameterObject`, `Security$ModuleRole` all carry both fields at depth.
 
-**Some top-level units carry `$ID` with NO `$QualifiedName` at all** — `Projects$Folder`, `DomainModels$DomainModel`, `Projects$ModuleSettings`, `Security$ModuleSecurity`. These must be synthesized, not dropped (see §4, Step 5).
+**Some top-level units carry `$ID` with NO `$QualifiedName`** — `Projects$Folder`, `DomainModels$DomainModel`, `Projects$ModuleSettings`, `Security$ModuleSecurity`. These are synthesized from the containment chain, not dropped.
+
+**`mx analyze-mpr` prints a size report, not a status report.** Sections: `MPR File Analysis`, `BSON contents`, `Content categories`, `Size by unit type`, `Size by property`, `Size by unit`, `Size by module`. Each is preceded by a blank line and followed by a rule of dashes — the blank line is what a parser uses to close the previous section. `Size by property` rows are shaped identically to `Size by unit type` rows and sit directly beneath them.
 
 **The two exit-code tables are different. Do not share a switch.**
 
@@ -53,143 +75,73 @@ Durable reference. Every item below was confirmed against real output or real `-
 | 4 | unsupported `.mpr` version | project in a different Mendix version |
 | 129 | generic diff error | — |
 
-**Verify exit codes empirically anyway.** This CLI family exits non-zero for a valid `--help`, which already broke the "0 = success" assumption once in this project (see `scripts/fetch-mx.sh`'s own workarounds).
+**Verify exit codes empirically anyway.** This CLI family exits non-zero for a valid `--help`, which already broke the "0 = success" assumption once.
 
-**`mx analyze-mpr` is version-agnostic** — it read an 11.10.0-authored file correctly using an 11.13.0 binary. That's what resolves the chicken-and-egg of "need the version to pick a binary, need a binary to read the version."
+**`mx analyze-mpr` is version-agnostic** — an 11.13.0 binary read an 11.10.0-authored file correctly. That resolves the chicken-and-egg of "need the version to pick a binary, need a binary to read the version."
 
-**Don't parse `.mxunit` files directly.** A diff `id` also maps to `mprcontents/<id[0:2]>/<id[2:4]>/<id>.mxunit`, and that file has plaintext-visible `Name` fragments — but it's BSON, and Mendix's specific application of it is undocumented and proprietary. `dump-mpr` reads the identical object graph through a supported JSON export. Same instinct that drove inspecting the `mxbuild` tarball before writing trim rules rather than guessing.
-
----
-
-## 3. Two named failure modes to handle explicitly
-
-Both were hit for real, and both surface as confusing parser exceptions if you don't catch them first.
-
-**Version-migration commits.** A commit that captures a Studio Pro version upgrade in progress contains a `Projects$ProjectConversion` unit and fails to parse with `Expected '$ID' as the first property of a storage object, but got 'Associations'.` This looks exactly like an `mx` bug and isn't. Detect via `analyze-mpr` and return `unsupportedVersionMigrationCommit` up front. (Manual trap #16.)
-
-**`.mpr` internal self-reference mismatch.** The test app is git-tracked as `MERA.mpr` but internally refers to `App.mpr`; `mx` refuses to open it under the "wrong" name with `existing MPR contents refer to MPR file '<X>'`. Glob for the real filename, then parse that error and retry against a renamed copy. Treat a persistent mismatch as an explicit failure mode — the copy is a workaround, not a fix. (Manual trap #15.)
+**Don't parse `.mxunit` files directly.** A diff `id` maps to `mprcontents/<id[0:2]>/<id[2:4]>/<id>.mxunit`, which has plaintext-visible `Name` fragments — but it's BSON, and Mendix's application of it is undocumented and proprietary. `dump-mpr` reads the identical object graph through a supported JSON export.
 
 ---
 
-## 4. Steps 1–6 — built
+## 3. Three named failure modes
 
-Steps 1–5 are in `internal/mx`, Step 6 in `internal/gitops`. All green under `go test ./...` and `go test -race ./...`, `gofmt`/`go vet` clean.
+**Version-migration commits — detected on failure, never predicted.** A commit capturing a Studio Pro upgrade in progress fails to parse with `Expected '$ID' as the first property of a storage object, but got 'Associations'.` Detect it by matching `mx.VersionMigrationSignature` against a *failed* diff's stderr.
 
-**Step 1 — `mx.go` + `version.go`.** Shared subprocess runner mirroring `internal/mxcli`'s `run()`, but deliberately divergent in two ways: it takes a `Binary` and execs `bin.Path` (never a bare `mx` on `PATH`), and it returns the raw exit code rather than folding non-zero into an error, because each subcommand's codes mean different things. No semaphore — `mx` is called a handful of times per request, not once per unit. `Binary{Version, Path}`, `Resolve` (exact match only, fail loudly per manual §1.3), `Highest` (numeric `a.b.c.d` comparison, not a string sort). `MERA_MX_ROOT` defaults to `/opt/mx`, threaded through `api.NewServer(workRoot, mxRoot)` — plumbed but not yet consumed, that's Step 7's job.
+> **This was implemented wrongly first, and the mistake is instructive.** The original code returned `unsupportedVersionMigrationCommit` whenever `analyze-mpr` mentioned `Projects$ProjectConversion` anywhere in its output. A real run rejected every commit of the test app with a 422. Two errors compounded: a `Projects$ProjectConversion` unit **persists in the model after an upgrade completes** (the test app carries exactly one and diffs perfectly), and manual trap #16 actually says *"if diffing **fails** on a project containing a `Projects$ProjectConversion` unit"* — the condition is the failure, the unit is only the explanation. Dropping the condition and keeping the explanation rejects every app that has ever been upgraded. Presence is now a warning.
 
-> `Binary.Path` is `<version>/modeler/mx`, **not** `<version>/mx`. The trimmed tree mirrors the tarball's `modeler/`+`runtime/` layout, so the binary sits one level deeper than manual §1.3's simplified diagram shows. Confirmed against the real Docker image. Locally, `MERA_MX_ROOT` must be an *absolute* path to the directory containing the version directories — `ls -d "$MERA_MX_ROOT"/*/modeler/mx` is the one-line check.
+**`.mpr` internal self-reference mismatch.** The test app is git-tracked as `MERA.mpr` but internally refers to `App.mpr`; `mx` refuses to open it under the "wrong" name with `existing MPR contents refer to MPR file '<X>'`. `mx.PrepareMpr` parses that error and retries against a renamed copy. Treat a persistent mismatch as an explicit failure — the copy is a workaround, not a fix. (Manual trap #15.)
 
-Covered by `TestResolve_*`, `TestHighest_*`, `TestCompareVersions`, `TestParseVersion*`, and `FuzzCompareVersions` (30s, ~2.9M execs, 0 failures). Version ordering rule agreed with Jord: major/minor/patch numeric, the fourth `d` field a plain string, absent `d` ranking below a present `d` at the same `a.b.c`.
-
-**Step 2 — `analyze.go`.** `AnalyzeResult{MendixVersion, HasProjectConversion, Raw}`, run against `Highest()`'s binary before the version-matched one is known. Parses `"Mendix version: X"` and scans for `Projects$ProjectConversion`. `ErrUnsupportedVersionMigrationCommit` exists and is ready for Step 7 to return.
-
-**Step 3 — `prepare.go`.** `PrepareMpr(ctx, bin, dir)` calls `gitops.FindMpr` (already exported), then `Analyze`; on a self-reference mismatch it copies the `.mpr` to the demanded name and retries once. `parseSelfReferenceMismatch` matches the confirmed real error text. Run once per worktree — version detection, migration detection, and the filename fix all fall out of one call per side.
-
-**Step 4 — `diff.go`.** `UnitDifference` grew one field beyond the plan: `Raw json.RawMessage`, capturing the complete per-unit object as produced (including `changeDetails`, a real field on `Modified` units). That's what feeds `ChangeUnit.StructuralDelta`. Full exit-code switch per §2's table. `stripBOM` was discovered here.
-
-Real captured output is committed as `internal/mx/testdata/diff-image-and-microflow.json` and round-tripped through `Diff()` by `TestDiff_RealCapturedFixture`, checking both units (the `Images$ImageCollection` Modified unit and the `Microflows$Microflow` Added unit). The parsing contract — the actual open risk — is covered; a live `Diff()` call against live worktrees in Docker is not yet done.
-
-**Step 5 — `resolve.go`.** `ResolveQualifiedNames` makes one `dump-mpr` call with comma-joined `--unit-type`, plus `Projects$Module` auto-appended by `ensureModuleType` to guarantee a base case for the fallback below. Decodes generically into `any` and walks recursively rather than modeling `dump-mpr`'s undocumented nesting schema.
-
-The nameless-unit gap from §2 is handled by a **two-phase resolve**: `indexByID` builds an id→node index over the whole tree, then `resolveFromTree` resolves each wanted id either natively or via `synthesizeQualifiedName`, which walks the `$ContainerID` chain up to the nearest ancestor that *does* have a `$QualifiedName` (normally the module) and composes a segment per hop from `name`, else `$ContainerProperty` (set on essentially every node — this is what made `ReviewManagement.domainModel`, `.moduleSettings`, `.moduleSecurity` resolvable), else `$Type` as a last resort. Synthesized results carry `QualifiedNameSynthesized: true` so a caller can render them as inferred. Depth/cycle-guarded at 32 hops — a synthetic cyclic-chain test confirms it degrades by omitting the id rather than hanging.
-
-Call it once per side: `head.mpr` for `change != "Deleted"`, `base.mpr` for `change != "Added"`. This handles a same-commit rename for free — the unit resolves to its old name in base and its new one in head, each valid in its own snapshot.
-
-`resolve.go` is at 100% statement coverage. Fixture `internal/mx/testdata/dump-reviewmanagement-trim.json` (real, trimmed to one item per type) drives `TestResolveFromTree_RealCapturedFixture`, asserting 13 real IDs — 6 requiring synthesis, 7 resolving natively — plus 11 synthetic-tree tests covering fallback ordering, multi-level and cyclic chains, missing ancestors, and non-string `$ID`/`$QualifiedName` values.
-
-> The fixture is **not exhaustive of every Mendix unit type** — no published REST service is present in it, among others. Treat gaps as untested, not as proven-absent.
-
-**Step 6 — `gitops.CloneBoth`.**
-
-- [x] `CloneBothRequest{RepoURL, Username, Pat, BaseSha, HeadSha}`, `CloneBothResult{WorkDir, BaseDir, HeadDir}`.
-- [x] `CloneBoth` — same remote-add / credential-helper dance as `Clone`, then `fetch --filter=blob:none --no-tags origin <baseSha> <headSha>` in **one** call.
-- [x] `git worktree add --detach <workDir>/base <baseSha>` and `.../head <headSha>`.
-- [x] Confirmed `Cleanup(workDir)` needs no change, and added a test that says so.
-- [x] Integration run against the real repo — both worktrees check out cleanly and each holds a non-empty `.mpr` plus `mprcontents/`.
-
-Landed in `internal/gitops/clone_both.go`, with `clone_both_test.go` (hermetic, `file://` fixture repo) and `clone_both_integration_test.go` (env-guarded, real Team Server). Design reasoning and the gotchas live in `MERA-extractor-design-notes.md` §5; the four that matter most here:
-
-1. **The repo is bare** — `workDir/repo.git` plus `base/` and `head/` worktrees. The plan implied worktrees nested under a normal checkout; bare removes an empty main working tree nothing should ever read, and sidesteps `worktree add` against an unborn `HEAD`.
-2. **The credential file must outlive the fetch.** Under `--filter=blob:none` it is the *checkout* that pulls file contents, so both `worktree add` calls hit the network authenticated. Confirmed empirically that `git fetch --filter` configures the promisor remote by itself (`remote.origin.promisor = true`, `partialclonefilter = blob:none`) — no explicit `extensions.partialClone` step needed.
-3. **A local fixture repo needs `uploadpack.allowAnySHA1InWant` and `uploadpack.allowFilter`.** Without the first, fetching by raw SHA is refused; without the second, `--filter` is silently ignored and the test greens while exercising a full fetch. Team Server allows both, which is what `Clone` has depended on since Stage 5.
-4. **SHA validation was retrofitted to `Clone` too.** An unvalidated SHA beginning with `-` is read by git as a flag (`--upload-pack=...`); that hole existed from Stage 5 and is now closed in both functions.
-
-> Also note: `git worktree add` needs a real git repository. A loose `.mpr` sitting in a directory is not enough — a real clone is a hard prerequisite, not an optimization.
+**A test that skips looks exactly like a test that passes.** `go test ./...` prints `ok` in 0.006s for a package whose integration tests all skipped. Nothing in Go reads `.env`, so forgetting `set -a; source .env; set +a` gives a green, instant, hollow run. Both integration files now use `requireIntegrationEnv`: `MERA_IT=1` makes a missing variable a failure, a half-configured environment is always a failure, and only a completely unset one skips.
 
 ---
 
-## 5. Steps 7–12 — remaining
+## 4. The type-mapping problem — still one open question
 
-### Step 7 — rewire the REST contract in `internal/api/extract.go`
+`mx diff` reports `Microflows$Microflow`; `mxcli describe` wants `microflow`. Nothing documents the mapping. Full write-up in `MERA-extractor-design-notes.md` §6; the unresolved part:
 
-- [ ] Replace `Sha` with `BaseSha`/`HeadSha`.
-- [ ] Keep `Units`/`Modules` as an explicit escape hatch — when set, skip the diff path and keep naive enumeration unchanged.
-- [ ] Wire the default path:
-  ```
-  gitops.CloneBoth
-    → mx.Highest + mx.PrepareMpr (head, and separately base)
-    → mx.Resolve(detected mendixVersion)
-    → mx.Diff(base.mpr, head.mpr)
-    → mx.ResolveQualifiedNames (head for non-Deleted, base for non-Added)
-    → assemble ChangeUnit{Module, UnitType, QualifiedName, ChangeKind, StructuralDelta}
-    → targeted describe (Step 8)
-  ```
-- [ ] Return `ErrUnsupportedVersionMigrationCommit` immediately when `PrepareMpr` reports `HasProjectConversion` — closes the Step 2 bullet that was blocked on this step.
-- [ ] Add response fields: `mendixVersion`, `storageFormat`, `mxcliVersion`, `mxVersion`, `changeUnits[]`, `textDiffs[]`, `warnings[]`.
-- [ ] Leave `referenceGraph` out deliberately (manual §1.6 has it as a later phase) — don't let it block this stage.
+**Two vocabularies exist.**
 
-> **Take the `.mpr` path from `PrepareMpr`'s return, not from your own `FindMpr` call.** The two can legitimately differ, because the self-reference workaround copies the file to the name `mx` demands. `CloneBoth` deliberately returns only directories for this reason — its own `FindMpr` calls are fast-fail validation, nothing more.
+```
+mx dump-mpr    →  Pages$Page   Pages$Snippet
+mx analyze-mpr →  Forms$Page   Forms$Snippet   Forms$Layout   Forms$BuildingBlock
+```
 
-**Verify:** `POST /extract` with `BaseSha`/`HeadSha` against the real repo runs end to end; the `Units`/`Modules` escape hatch still returns the old response unchanged; response matches the frozen contract's field list.
+`analyze-mpr` reports storage-level names, `dump-mpr` the current public metamodel names — Mendix evidently renamed the `Forms` namespace to `Pages` without changing what is on disk. **Which one `mx diff` speaks is still unknown.** The proving run's diff contained only `Microflows$Microflow` and `Images$ImageCollection`, which are spelled identically in both and therefore discriminate nothing.
 
-### Step 8 — targeted describe, before/after
+Both spellings are mapped, so the code is correct either way. To settle it: run the integration test against a commit pair that touches a **page**, and read the type table. Then delete the dead half.
 
-- [ ] `describeChangeUnits`, sibling to `describeAll` — same one-goroutine-per-unit pattern on `internal/mxcli`'s existing global semaphore, but up to two `Describe` calls per unit.
-- [ ] `changeKind != "Added"` → describe from `base.mpr` using the **base-side** qualified name → `BeforeMdl`.
-- [ ] `changeKind != "Deleted"` → describe from `head.mpr` using the **head-side** qualified name → `AfterMdl`.
-- [ ] Describe failures degrade to a warning, never a request failure.
-
-**Verify:** unit test that a forced failure yields a warning and the request still completes; integration test covering all four cases — Added, Modified, Deleted, and a same-commit rename where base and head names correctly differ.
-
-### Step 9 — token estimate
-
-- [ ] `tokenEstimate = len(beforeMdl + afterMdl + structuralDeltaJSON) / 3.6`.
-
-Explicitly manual §1.5's placeholder constant — "measure on your own corpus later." It only needs to be right enough for batching decisions; the API returns exact counts anyway.
-
-**Verify:** unit-test the arithmetic; order-of-magnitude sanity check against a couple of real payloads.
-
-### Step 10 — `textDiffs` (optional — don't let it block 7–9)
-
-- [ ] `git diff --unified=5 base head -- javasource theme deployment '*.json'` against the two worktrees, parsed into the `textDiffs[]` shape.
-
-Cleanly separable from the `mx diff` path. Land it after 7–9 work end to end.
-
-**Verify:** integration test against a commit pair with `javasource`/`theme` changes, compared directly to `git diff` output.
-
-### Step 11 — testing
-
-- [ ] Extend the stub-`mx` harness (`writeStubMx` / `writeDiffStubMx` / `writeDumpMprStubMx` already exist in `internal/mx`'s tests) to cover the Step 7–8 paths.
-- [ ] **Guarded integration test** against the real repo, using the two already-validated commit pairs: microflow-only add, and image-add-plus-microflow.
-
-> The guard pattern is established — copy `internal/gitops/clone_both_integration_test.go`: skip unless the `MERA_IT_*` env vars and `MERA_PAT` are all set, so `go test ./...` stays hermetic and offline. Nothing in Go reads `.env`; use `set -a; source .env; set +a` (and `KEY=value` with no spaces, or the assignment silently does nothing).
-
-**Verify:** the integration `/extract` response shows real `changeUnits[]` with correctly resolved `qualifiedName`s and real `beforeMdl`/`afterMdl` — not naive full-app enumeration — for both validated pairs.
-
-### Step 12 — document it
-
-- [ ] Fold the remaining implementation notes into `MERA-extractor-design-notes.md` once Steps 7–11 land — code-level *decisions and gotchas*, not source listings (the repo holds the code). Step 6 is already written up there, in §5.
-- [ ] Update `MERA-session-status.md` to reflect the new state.
-- [ ] Keep the Step 0 id-correlation story as a callout, in the same "what we thought, what testing found wrong, what changed" style as the Stage 6→7 concurrency write-up.
+> An earlier revision of the design notes asserted the two tools shared one vocabulary, citing exactly those two non-discriminating types as evidence. Recorded here because the error is easy to repeat: overlapping observations are not confirming observations.
 
 ---
 
-## 6. Outstanding integration runs
+## 5. What each step landed
 
-Step 6's integration test is green against the real repo. These `mx`-side runs still need the real repo and a real Team Server connection, and none have been done:
+| Step | What | Where |
+|---|---|---|
+| 1 | `Binary`, `Resolve` (exact match, no fallback), `Highest` (numeric compare) | `internal/mx/mx.go`, `version.go` |
+| 2 | `Analyze` — Mendix version + unit-type inventory from `analyze-mpr` | `internal/mx/analyze.go` |
+| 3 | `PrepareMpr` — find the `.mpr`, analyse it, self-heal the filename mismatch | `internal/mx/prepare.go` |
+| 4 | `Diff` — full exit-code switch, BOM stripping, `Raw` per unit | `internal/mx/diff.go` |
+| 5 | `ResolveQualifiedNames` — one `dump-mpr` per side, two-phase resolve with containment-chain synthesis | `internal/mx/resolve.go` |
+| 6 | `CloneBoth` — bare repo + two detached worktrees from one fetch | `internal/gitops/clone_both.go` |
+| 7 | `handleExtract` rewired to `baseSha`/`headSha` → `changeUnits[]`, behind a `Deps` seam | `internal/api/extract.go`, `deps.go` |
+| 8 | `describeChangeUnits` — targeted before/after describe, two names per unit | `internal/api/extract.go` |
+| 9 | `tokenEstimate` — manual §1.5's `/3.6` placeholder | `internal/api/extract.go` |
+| 10 | `TextDiffs` — per-file unified diffs for javasource/theme/deployment/json | `internal/gitops/textdiff.go` |
+| 11 | Hermetic tests throughout plus three guarded integration tests | `*_test.go` |
+| 12 | This doc, `MERA-extractor-design-notes.md` §5–§6, `MERA-session-status.md` | — |
 
-- `PrepareMpr` against the commit known to hit the `MERA.mpr`/`App.mpr` mismatch — confirm it self-heals.
-- `ResolveQualifiedNames` against Step 4's real diff output — confirm names match what was seen by hand (`MxCliExtractor.ACT_Test_newMicroflow`).
-- A live `Diff()` call against live base/head worktrees inside the container, rather than the committed fixture.
+Coverage: `internal/api` 93.5%, `internal/gitops` 72.1%, `internal/mx` well covered including a real captured `analyze-mpr` report and a real captured `mx diff` payload as fixtures. Everything green under `-race`.
 
-All three are now cheaply reachable: `CloneBoth` produces exactly the base/head worktree pair they need, so each can be written as a guarded integration test that calls it first.
+---
+
+## 6. Follow-ups this stage leaves behind
+
+1. **Settle `Forms$` vs `Pages$`** — one integration run against a page-touching commit pair (§4).
+2. **Prove `textDiffs` against the real repo** — one run against a `javasource`-touching pair (§1).
+3. **Clean up `mxcliVersion`** — `mxcli.Version` should return `v0.19.0`, not a sentence with a newline (§1).
+4. **Four `UNVERIFIED` entries and ~18 unmapped mxcli types** remain in `diffTypeToMxcli`. The warning mechanism names them as real commits hit them.
+5. **`storageFormat` is emitted empty.** `AnalyzeResult` does not expose it and inventing `"MPRv2"` would fabricate provenance. `mx diff`'s own output has top-level `base`/`mine` fields that `DiffResult` currently discards — worth checking whether they carry it.
+6. **The error envelope** — manual §1.4 specifies `{requestId, error, detail, retryable}`; `respondError` still emits `{"error": "..."}`.
+7. **Request auth shape** — still flat `username`/`pat` rather than §1.4's `auth: {kind, username, secret}`, with `provider` and `options` absent.
+8. **`referenceGraph`** — manual §1.6, deliberately a later phase.

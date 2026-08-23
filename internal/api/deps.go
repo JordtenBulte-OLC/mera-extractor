@@ -25,6 +25,7 @@ type Deps struct {
 	CloneBoth func(ctx context.Context, workRoot string, req gitops.CloneBothRequest) (gitops.CloneBothResult, error)
 	Cleanup   func(workDir string) error
 	FindMpr   func(dir string) (string, error)
+	TextDiffs func(ctx context.Context, repoDir, baseSha, headSha string, pathspecs []string) ([]gitops.TextDiff, error)
 
 	MxHighest             func(mxRoot string) (mx.Binary, error)
 	MxResolve             func(mxRoot, mendixVersion string) (mx.Binary, error)
@@ -50,6 +51,9 @@ func (d Deps) withDefaults() Deps {
 	}
 	if d.FindMpr == nil {
 		d.FindMpr = gitops.FindMpr
+	}
+	if d.TextDiffs == nil {
+		d.TextDiffs = gitops.TextDiffs
 	}
 	if d.MxHighest == nil {
 		d.MxHighest = mx.Highest

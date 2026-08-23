@@ -19,6 +19,7 @@ type CloneBothRequest struct {
 
 type CloneBothResult struct {
 	WorkDir string `json:"workDir"` // caller is responsible for Cleanup(WorkDir)
+	RepoDir string `json:"repoDir"` // the bare object store; what TextDiffs runs against
 	BaseDir string `json:"baseDir"` // worktree checked out at BaseSha
 	HeadDir string `json:"headDir"` // worktree checked out at HeadSha
 }
@@ -113,5 +114,5 @@ func CloneBoth(ctx context.Context, workRoot string, req CloneBothRequest) (Clon
 		return fail(fmt.Errorf("head worktree at %s: %w", req.HeadSha, err))
 	}
 
-	return CloneBothResult{WorkDir: workDir, BaseDir: baseDir, HeadDir: headDir}, nil
+	return CloneBothResult{WorkDir: workDir, RepoDir: repoDir, BaseDir: baseDir, HeadDir: headDir}, nil
 }
