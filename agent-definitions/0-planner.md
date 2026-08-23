@@ -49,5 +49,3 @@ event handlers. These are reviewed first and never skimmed.
 
 Output only JSON matching the supplied schema. No prose.
 ```
-
-**Output schema:** `{ verdicts: [{qualifiedName, verdict, reason, impactAnalysisRequired}], focusNotes: {layer1, layer2, layer3}, highRiskUnits: [string], estimatedBatches: int }`
