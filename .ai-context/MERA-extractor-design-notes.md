@@ -156,12 +156,107 @@ Use a `file://` URL, not a bare path: a plain path triggers git's local-transpor
 
 ---
 
-## 6. Still open
+## 6. The `/extract` pipeline (Stage 8, Steps 7–9)
+
+`handleExtract` now runs: `CloneBoth` → `PrepareMpr` per side → migration check → version-matched binary → `Diff` → `ResolveQualifiedNames` per side → plan → targeted describe → respond. Files: `internal/api/extract.go` and `internal/api/deps.go`, 32 tests at 93% statement coverage, green under `-race`.
+
+### The `Deps` seam
+
+Everything that shells out or touches the network reaches the handler through a `Deps` struct of **function fields**, held on `Server`.
+
+Function fields rather than an interface, because a test almost never wants to fake all eleven — it overrides the two it cares about and the rest stay real. An interface would force every fake to implement the whole surface. `withDefaults()` fills each nil field with the real implementation, so **the zero value means "use the real tools"** and adding the seam cost exactly one new field on `Server`; `NewServer` and every existing construction site were untouched.
+
+`withDefaults()` runs per request rather than in `NewServer`, so a `Server` built as a struct literal — which every test does — behaves identically to one from the constructor. `TestDepsWithDefaults_FillsEveryNil` walks the struct reflectively, so adding a field and forgetting its `withDefaults` line fails a test instead of nil-panicking in production.
+
+This is not a regression against §1's no-globals rule: the seam is per-`Server` state, not a package-level variable, and it carries behaviour rather than configuration.
+
+### The type-mapping problem — the crux of Step 8
+
+`mx diff` reports `Microflows$Microflow`. `mxcli describe` wants `microflow`. Nothing in Mendix's documentation maps between them, and **this translation is most of what makes targeted describe work at all.**
+
+**The two tools share one vocabulary.** `mx dump-mpr`'s `$Type` and `mx diff`'s `type` produce identical strings. The evidence is direct: `Microflows$Microflow` and `Images$ImageCollection` each appear in both a real diff and a real dump. That is what makes it legitimate to read the keys straight off `internal/mx/testdata/dump-reviewmanagement-trim.json` rather than guess them, and it is worth re-confirming if either tool is ever upgraded.
+
+Types are classified into three tiers, and the tiering is the design:
+
+**1. `diffTypeToMxcli` — confirmed.** Every top-level unit type observed in the real dump, matched against `mxcli describe --help` (v0.19.0):
+
+| `$Type` | mxcli type |
+|---|---|
+| `Microflows$Microflow` | `microflow` |
+| `Pages$Page` | `page` |
+| `Pages$Snippet` | `snippet` |
+| `Constants$Constant` | `constant` |
+| `Enumerations$Enumeration` | `enumeration` |
+| `JavaActions$JavaAction` | `javaaction` |
+| `JsonStructures$JsonStructure` | `jsonstructure` |
+| `ImportMappings$ImportMapping` | `importmapping` |
+| `ExportMappings$ExportMapping` | `exportmapping` |
+| `Images$ImageCollection` | `imagecollection` |
+
+Plus four confirmed type strings that appear *nested* in dump-mpr but carry a real `$QualifiedName` and have an mxcli type — `DomainModels$Entity`, `DomainModels$Association`, `DomainModels$CrossAssociation`, `Security$ModuleRole`. Whether `mx diff` ever reports at member granularity is unknown; a domain-model edit may well surface as `DomainModels$DomainModel` instead. Harmless if never hit.
+
+**2. `knownNotDescribable` — expected to produce no MDL, with a reason.** `Projects$Folder`, `Projects$ModuleSettings`, `DomainModels$DomainModel`, `Security$ModuleSecurity` have no mxcli type at all. And deliberately:
+
+> **`Projects$Module` is not mapped, even though `mxcli describe module` exists.** That command renders the module's *entire contents* — a module-level change would drag in all 87 units of `ReviewManagement` and reintroduce exactly the full-app enumeration Stage 8 exists to eliminate. Its individual changed units are reported separately anyway. This is a decision, not an omission.
+
+**3. Everything else — one warning per distinct type**, naming the exact string `mx` emitted and saying which table to add it to.
+
+Separating tier 2 from tier 3 is what keeps the warning list actionable. If folders and domain models warned on every commit that touched one, the list would become noise and get ignored — and the *real* signal, an unrecognised type, would be lost in it.
+
+**Completeness was never the goal; self-correction was.** An unclassified type still produces a `changeUnit` carrying type, changeKind, `structuralDelta` and a resolved name — just no MDL — and tells you exactly what to add. That is why four `UNVERIFIED` pattern guesses (`Microflows$Nanoflow`, `Workflows$Workflow`, `Pages$Layout`, `Pages$BuildingBlock`) are acceptable: the `<PluralNamespace>$<TypeName>` pattern holds across all fourteen confirmed strings, a wrong key simply never matches, and a wrong value degrades to a per-unit describe warning.
+
+The same reasoning is why roughly eighteen further mxcli types — `restclient`, `odataservice`, `queue`, `scheduledevent`, `navigation`, `settings`, `agent`, `aimodel` and the rest — are **left out on purpose**. Their mxcli side is known but no metamodel string is confirmed for any of them, and inventing eighteen namespaces would put fiction into a lookup table that reads as authoritative. Let a real commit surface them.
+
+`TestTypeTablesAreCoherent` guards all of it: every mapped value must exist in the v0.19.0 type list, no key may appear in both tables, keys must look like `Namespace$Type`, and all fourteen dump-observed types must be classified somewhere.
+
+> The dump fixture is ReviewManagement-only and trimmed to one item per type. Absent types are **untested, not proven absent** — no `Workflows$Workflow` and no published REST service appear in it.
+
+### Two names, one response field
+
+A unit renamed inside one commit has a different qualified name in base and in head. The frozen contract has a single `qualifiedName`, so the internal `changePlan` carries **both** all the way to the describe stage: `beforeMdl` is fetched from `base.mpr` under the old name, `afterMdl` from `head.mpr` under the new one. Collapsing to one name before describe runs would silently produce a wrong or empty `beforeMdl`.
+
+The response reports the head-side name, falling back to base for a deleted unit, and adds `previousQualifiedName` (omitempty) when the two differ. That field is **not** in manual §1.4 — it is additive, so no existing consumer sees a change, and dropping it would lose information the reviewer needs. `TestExtract_RenameDescribesEachSideByItsOwnName` pins the whole behaviour down.
+
+### What degrades and what is fatal
+
+Manual §1.4's partial-success rule was applied deliberately, case by case, rather than blanket-applied:
+
+**Warnings, request still `200`:** a describe failure on one unit; a base/head Mendix version mismatch (head's version selects the binary, since head is what's under review); `mx diff` exiting 2 with conflicts found, which the manual confirms is still usable output; a failure to read the mxcli version, which is provenance rather than payload.
+
+**Also a warning — and this one is debatable:** a wholesale `ResolveQualifiedNames` failure. Failing the request would throw away a successful clone and diff, and the units still carry type, changeKind and `structuralDelta`, which is a diminished but real review payload. If experience says a nameless response is worse than no response, it is a three-line change.
+
+**Fatal:** a version-migration commit on *either* side (`422`, checked before `Diff` runs so the opaque `$ID`/`Associations` parse exception never surfaces); no binary matching the detected version (`422`, per manual §1.3's fail-loudly-never-substitute rule); a clone failure (`502`); no binaries at all under `MxRoot` (`500` — that is our misconfiguration, not the caller's).
+
+`mx diff`'s typed errors split on the same axis: `ErrUnsupportedMendixVersion` is `422` because the caller chose the commits; everything else is `500`.
+
+### The escape hatch
+
+`Units`/`Modules` skip the diff path entirely and run the old naive enumeration. Two decisions were needed that the checklist did not record:
+
+- **It enumerates against the HEAD worktree.** The request no longer carries a single `sha`, and head is the only defensible reading of "the app" when two commits are in play.
+- **It returns a separate `legacyExtractResponse` type**, not the new struct with fields omitted. That way "the old response is unchanged" is guaranteed by the type system rather than by careful `omitempty` tagging, and a test asserts the new field names never appear in that body.
+
+### Deliberately not done in Step 7
+
+Recording these so they read as decisions rather than oversights:
+
+- **The error envelope.** Manual §1.4 specifies `{requestId, error, detail, retryable}`; the existing `respondError` still emits `{"error": "..."}`. Contract-shaped work that deserves its own step.
+- **Request auth shape.** Still flat `username`/`pat` rather than §1.4's `auth: {kind, username, secret}`, with `provider` and `options` absent. Changing it would break the current caller for no Stage 8 benefit.
+- **`storageFormat` is emitted empty.** `mx.AnalyzeResult` does not expose it, and emitting `"MPRv2"` would be a fabricated value in a field whose entire purpose is provenance. Check whether `analyze-mpr`'s raw output carries a storage-format line; if so it is a two-line fix in `internal/mx`.
+- **`referenceGraph` and `textDiffs`** — manual §1.6 and Step 10 respectively.
+
+---
+
+## 7. Still open
 
 1. **`/clone`'s workDir is never reaped.** Unlike `/extract` (whose whole lifecycle fits in one request, so `defer gitops.Cleanup` is correct), a standalone `/clone` deliberately outlives its request so the caller can use the checkout — and nothing currently cleans it up. It sits on disk until the container restarts. Fine for local testing; must be solved before this runs unattended. This is exactly what the leased-workspace TTL in manual §1.8 exists for. `CloneBoth` inherits the same exposure the moment anything calls it outside a single request.
 
 2. **`/health` now queues behind the semaphore.** As of Stage 7 it calls `mxcli.Version`, which funnels through the same gated `run()`. Under a fully-loaded extraction a health check can queue rather than returning instantly. Arguably correct — it reflects real backpressure — but if a deployment platform's liveness probe has a tight timeout this needs a decision. Options: give `/health` a check that doesn't call `mxcli` at all, or exempt `Version` from the semaphore.
 
-3. **Test coverage is uneven.** `internal/mx` is well covered (see `MERA-stage8.md`), and `internal/gitops` now has hermetic fixture-repo tests plus a guarded integration test. `internal/mxcli` has only the concurrency test — a correctness test for `describeAll`'s ordering and warning behaviour is still worth writing, and it needs its own stub seam now that the function no longer takes a worker count to control.
+3. **Test coverage is uneven.** `internal/mx` is well covered (see `MERA-stage8.md`); `internal/gitops` has hermetic fixture-repo tests plus a guarded integration test; `internal/api` is at 93% via the `Deps` seam. `internal/mxcli` has only the concurrency test — a correctness test for its `run()` banner-stripping and error behaviour is still worth writing.
 
 4. **`CloneBoth`'s 300s timeout is a guess.** It covers one fetch plus two full Mendix checkouts, each paying its own lazy-blob round trip — 2.5× `Clone`'s budget for roughly 2× the work, plus slack. It is a package-level `var` so a test can shrink it. Replace the guess with a measurement once real `/extract` calls are running against apps larger than the 608-unit test app.
+
+5. **Four `UNVERIFIED` entries in `diffTypeToMxcli`**, and ~18 mxcli types with no metamodel string at all. Both resolve the same way: run `/extract` against commits touching varied unit types and read the warnings. Promote what the warnings name; delete what never appears.
+
+6. **The `mx` calls in `/extract` run sequentially.** Two `PrepareMpr` calls, then `Diff`, then two `ResolveQualifiedNames` calls — five .NET process startups back to back. The base and head sides of both `PrepareMpr` and `ResolveQualifiedNames` are independent and could run concurrently, roughly halving the `mx` portion of wall-clock. Deliberately left sequential until a real timing measurement says it matters; `internal/mx` has no semaphore, so this is free to parallelise when it does.

@@ -4,8 +4,9 @@ package api
 import "net/http"
 
 type Server struct {
-	WorkRoot string // where clones get created; see gitops.Clone
-	MxRoot   string // where mx/mxbuild binaries live; see internal/mx.Resolve/Highest
+	WorkRoot string
+	MxRoot   string
+	Deps     Deps // ← new. Zero value means "use the real tools".
 }
 
 func NewServer(workRoot, mxRoot string) *Server {
