@@ -213,14 +213,24 @@ var knownNotDescribable = map[string]string{
 // Handler
 // ---------------------------------------------------------------------------
 
+// respondExtractError wraps respondError with the one piece of context that
+// only /extract's handlers have: requestId, the correlation ID the caller
+// itself minted (manual §1.4). It rides inside err's text, so it lands in
+// respondError's unconditional server-side log line automatically, and in
+// the client-visible message too for anything under 5xx — that's fine,
+// requestId isn't sensitive, and the caller already knows its own value.
+func respondExtractError(w http.ResponseWriter, r *http.Request, req extractRequest, status int, err error) {
+	respondError(w, r, status, fmt.Errorf("requestId=%s: %w", req.RequestID, err))
+}
+
 func (s *Server) handleExtract(w http.ResponseWriter, r *http.Request) {
 	var req extractRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondError(w, http.StatusBadRequest, err)
+		respondError(w, r, http.StatusBadRequest, err)
 		return
 	}
 	if req.BaseSha == "" || req.HeadSha == "" {
-		respondError(w, http.StatusBadRequest, errors.New("baseSha and headSha are both required"))
+		respondExtractError(w, r, req, http.StatusBadRequest, errors.New("baseSha and headSha are both required"))
 		return
 	}
 
@@ -238,7 +248,7 @@ func (s *Server) handleExtract(w http.ResponseWriter, r *http.Request) {
 		// A malformed (as opposed to missing) SHA also lands here as a 502,
 		// because gitops validates internally and exports no predicate to ask
 		// first. Worth revisiting if it turns out to confuse callers.
-		respondError(w, http.StatusBadGateway, err)
+		respondExtractError(w, r, req, http.StatusBadGateway, err)
 		return
 	}
 	// Same reasoning as before Stage 8: the whole lifecycle fits in one
@@ -247,14 +257,14 @@ func (s *Server) handleExtract(w http.ResponseWriter, r *http.Request) {
 	defer d.Cleanup(clone.WorkDir)
 
 	if len(req.Units) > 0 || len(req.Modules) > 0 {
-		s.extractNaive(ctx, w, d, req, clone)
+		s.extractNaive(ctx, w, r, d, req, clone)
 		return
 	}
-	s.extractDiff(ctx, w, d, req, clone)
+	s.extractDiff(ctx, w, r, d, req, clone)
 }
 
 // extractDiff is the Stage 8 default path: real change detection via mx diff.
-func (s *Server) extractDiff(ctx context.Context, w http.ResponseWriter, d Deps, req extractRequest, clone gitops.CloneBothResult) {
+func (s *Server) extractDiff(ctx context.Context, w http.ResponseWriter, r *http.Request, d Deps, req extractRequest, clone gitops.CloneBothResult) {
 	var warnings []string
 
 	// A bootstrap binary, used only to read each side's Mendix version.
@@ -264,19 +274,19 @@ func (s *Server) extractDiff(ctx context.Context, w http.ResponseWriter, d Deps,
 	// installed under MxRoot), not a bad request.
 	boot, err := d.MxHighest(s.MxRoot)
 	if err != nil {
-		respondError(w, http.StatusInternalServerError,
+		respondExtractError(w, r, req, http.StatusInternalServerError,
 			fmt.Errorf("no usable mx binary under %s: %w", describeMxRoot(s.MxRoot), err))
 		return
 	}
 
 	headMpr, headInfo, err := d.PrepareMpr(ctx, boot, clone.HeadDir)
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, fmt.Errorf("prepare head .mpr: %w", err))
+		respondExtractError(w, r, req, http.StatusInternalServerError, fmt.Errorf("prepare head .mpr: %w", err))
 		return
 	}
 	baseMpr, baseInfo, err := d.PrepareMpr(ctx, boot, clone.BaseDir)
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, fmt.Errorf("prepare base .mpr: %w", err))
+		respondExtractError(w, r, req, http.StatusInternalServerError, fmt.Errorf("prepare base .mpr: %w", err))
 		return
 	}
 
@@ -303,7 +313,7 @@ func (s *Server) extractDiff(ctx context.Context, w http.ResponseWriter, d Deps,
 	bin, err := d.MxResolve(s.MxRoot, headInfo.MendixVersion)
 	if err != nil {
 		// manual §1.3: fail loudly, never substitute a nearby version.
-		respondError(w, http.StatusUnprocessableEntity,
+		respondExtractError(w, r, req, http.StatusUnprocessableEntity,
 			fmt.Errorf("unsupportedMendixVersion %s under %s: %w",
 				headInfo.MendixVersion, describeMxRoot(s.MxRoot), err))
 		return
@@ -316,10 +326,10 @@ func (s *Server) extractDiff(ctx context.Context, w http.ResponseWriter, d Deps,
 		// it from analyze-mpr keeps the clean error message without rejecting
 		// commits that would have worked.
 		if mig := asVersionMigrationFailure(err, headInfo.MendixVersion); mig != nil {
-			respondError(w, http.StatusUnprocessableEntity, mig)
+			respondExtractError(w, r, req, http.StatusUnprocessableEntity, mig)
 			return
 		}
-		respondError(w, diffErrorStatus(err), err)
+		respondExtractError(w, r, req, diffErrorStatus(err), err)
 		return
 	}
 	if diff.ConflictsFound {
@@ -372,10 +382,10 @@ func (s *Server) extractDiff(ctx context.Context, w http.ResponseWriter, d Deps,
 // Units/Modules escape hatch. It runs against the HEAD worktree — the request
 // no longer carries a single `sha`, and head is the only defensible reading of
 // "the app" when two commits are in play.
-func (s *Server) extractNaive(ctx context.Context, w http.ResponseWriter, d Deps, req extractRequest, clone gitops.CloneBothResult) {
+func (s *Server) extractNaive(ctx context.Context, w http.ResponseWriter, r *http.Request, d Deps, req extractRequest, clone gitops.CloneBothResult) {
 	mprPath, err := d.FindMpr(clone.HeadDir)
 	if err != nil {
-		respondError(w, http.StatusBadGateway, err)
+		respondExtractError(w, r, req, http.StatusBadGateway, err)
 		return
 	}
 
@@ -383,7 +393,7 @@ func (s *Server) extractNaive(ctx context.Context, w http.ResponseWriter, d Deps
 	if len(units) == 0 {
 		enumerated, err := enumerate(ctx, d, mprPath, req.Modules)
 		if err != nil {
-			respondError(w, http.StatusBadGateway, err)
+			respondExtractError(w, r, req, http.StatusBadGateway, err)
 			return
 		}
 		units = enumerated

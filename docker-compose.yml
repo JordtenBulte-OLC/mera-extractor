@@ -12,6 +12,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      target: runtime
     image: mera-extractor:local
     container_name: mera-extractor
 
@@ -76,6 +77,57 @@ services:
       start_period: 30s
 
     restart: unless-stopped
+
+  # Debug variant of the same service — a `dlv --headless` process wrapping
+  # an unoptimized (-gcflags="all=-N -l") build of the extractor, per the
+  # `debug` stage in the Dockerfile. Not started by a plain `docker compose
+  # up`; the `debug` profile keeps it opt-in, and it shares the 8081 host
+  # port with `extractor` above, so run one or the other, never both:
+  #
+  #   docker compose --profile debug up -d --build extractor-debug
+  #
+  # dlv pauses the process at start — nothing runs, including /health —
+  # until an IDE attaches on 2345 and issues `continue`. Set breakpoints
+  # first, then continue, then send the request from Mendix.
+  extractor-debug:
+    profiles: ["debug"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: debug
+    image: mera-extractor:debug
+    container_name: mera-extractor-debug
+
+    # dlv exec ptraces the target process; Docker's default capability set
+    # excludes that regardless of the container's user. If dlv still fails
+    # to attach after this, the host's seccomp profile is blocking the
+    # ptrace syscall itself — add `security_opt: ["seccomp=unconfined"]`.
+    cap_add:
+      - SYS_PTRACE
+
+    ports:
+      - "8081:8080"   # same URL Mendix already calls — see extractor above
+      - "2345:2345"   # dlv's debug protocol — point your IDE here
+
+    environment:
+      PORT: "8080"
+      MERA_WORK_ROOT: "/work"
+      MERA_MX_ROOT: "/opt/mx"
+      MERA_MXCLI_CONCURRENCY: "8"
+      MERA_LOG_FILE: "/var/log/mera-extractor/extractor.log"
+
+    volumes:
+      - mera-work:/work
+      - ./logs:/var/log/mera-extractor
+
+    mem_limit: 4g
+    cpus: 8
+
+    # No healthcheck: the process is meant to sit paused pre-`continue`,
+    # which a healthcheck would just report as unhealthy noise.
+    # No restart policy: this is a manual, on-demand debug session, not a
+    # long-running service — let it stop when dlv or the debugger does.
+    restart: "no"
 
 volumes:
   mera-work:

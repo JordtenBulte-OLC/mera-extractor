@@ -65,7 +65,7 @@ RUN --mount=type=cache,target=/mxcache,sharing=locked \
     du -sh /build/.mx-binaries/*
 
 # ---------- stage 3: the actual image ----------
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim AS runtime
 ARG TARGETARCH=amd64
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -104,3 +104,19 @@ WORKDIR /work
 ENV MERA_WORK_ROOT=/work
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/extractor"]
+
+## Debug configuration
+
+FROM golang:1.27-bookworm AS delve
+RUN go install github.com/go-delve/delve/cmd/dlv@latest
+
+FROM build AS build-debug
+RUN CGO_ENABLED=0 go build -gcflags="all=-N -l" -o /out/extractor-debug .
+
+FROM runtime AS debug
+USER root
+COPY --from=delve /go/bin/dlv /usr/local/bin/dlv
+COPY --from=build-debug /out/extractor-debug /usr/local/bin/extractor
+USER extractor
+ENTRYPOINT ["dlv", "exec", "/usr/local/bin/extractor", \
+  "--headless", "--listen=:2345", "--api-version=2", "--accept-multiclient", "--"]

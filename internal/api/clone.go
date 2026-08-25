@@ -18,7 +18,7 @@ type cloneRequest struct {
 func (s *Server) handleClone(w http.ResponseWriter, r *http.Request) {
 	var req cloneRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondError(w, http.StatusBadRequest, err)
+		respondError(w, r, http.StatusBadRequest, err)
 		return
 	}
 
@@ -26,7 +26,7 @@ func (s *Server) handleClone(w http.ResponseWriter, r *http.Request) {
 		RepoURL: req.RepoURL, Username: req.Username, Pat: req.Pat, Sha: req.Sha,
 	})
 	if err != nil {
-		respondError(w, http.StatusBadGateway, err) // upstream (git) failed, not our code
+		respondError(w, r, http.StatusBadGateway, err) // upstream (git) failed, not our code
 		return
 	}
 	// Note: this clone is NOT cleaned up here — the whole point of a

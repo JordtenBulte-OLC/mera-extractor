@@ -17,7 +17,7 @@ type describeRequest struct {
 func (s *Server) handleDescribe(w http.ResponseWriter, r *http.Request) {
 	var req describeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondError(w, http.StatusBadRequest, err)
+		respondError(w, r, http.StatusBadRequest, err)
 		return
 	}
 

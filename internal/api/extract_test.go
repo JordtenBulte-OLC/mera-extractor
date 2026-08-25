@@ -2,10 +2,12 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -415,6 +417,23 @@ func TestExtract_RelativeMxRootErrorNamesTheResolvedPath(t *testing.T) {
 	h.srv.Deps.MxHighest = func(mxRoot string) (mx.Binary, error) {
 		return mx.Binary{}, errors.New("no such file or directory")
 	}
+
+	// This is a 500 (server misconfiguration, not a bad request), so per
+	// respondError's policy the resolved-path detail belongs in the
+	// server-side log now, not the response body — the body only gets the
+	// generic message. Capture log output for the duration of this test
+	// rather than relying on the real destination (stdout, or wherever
+	// MERA_LOG_FILE points), and restore it after.
+	var logBuf bytes.Buffer
+	origOutput := log.Writer()
+	origFlags := log.Flags()
+	log.SetOutput(&logBuf)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(origOutput)
+		log.SetFlags(origFlags)
+	})
+
 	// Decode rather than string-matching the raw body: JSON escapes the quotes
 	// describeMxRoot emits, so `"./.mx-binaries"` appears on the wire as
 	// \"./.mx-binaries\" and a naive Contains check fails on a correct message.
@@ -422,19 +441,26 @@ func TestExtract_RelativeMxRootErrorNamesTheResolvedPath(t *testing.T) {
 		Error string `json:"error"`
 	}
 	rec := h.postDefault()
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body = %s", rec.Code, rec.Body.String())
+	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("decode error body: %v\n%s", err, rec.Body.String())
 	}
-
-	if !strings.Contains(payload.Error, `"./.mx-binaries"`) {
-		t.Errorf("error should quote the configured value: %s", payload.Error)
+	if payload.Error != "internal error" {
+		t.Errorf("response body should not carry the resolved path, got: %s", payload.Error)
 	}
-	if !strings.Contains(payload.Error, "resolved to") {
-		t.Errorf("error should say where that actually points: %s", payload.Error)
+
+	logged := logBuf.String()
+	if !strings.Contains(logged, `"./.mx-binaries"`) {
+		t.Errorf("logged error should quote the configured value: %s", logged)
+	}
+	if !strings.Contains(logged, "resolved to") {
+		t.Errorf("logged error should say where that actually points: %s", logged)
 	}
 	cwd, _ := os.Getwd()
-	if !strings.Contains(payload.Error, filepath.Join(cwd, ".mx-binaries")) {
-		t.Errorf("resolved path should be the absolute one: %s", payload.Error)
+	if !strings.Contains(logged, filepath.Join(cwd, ".mx-binaries")) {
+		t.Errorf("logged resolved path should be the absolute one: %s", logged)
 	}
 }
 
