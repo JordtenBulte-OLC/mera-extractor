@@ -39,6 +39,8 @@ services:
       # this process may actually use. Keep it in step with `cpus` below.
       MERA_MXCLI_CONCURRENCY: "8"
 
+      MERA_LOG_FILE: "/var/log/mera-extractor/extractor.log"
+
     # NEVER put MERA_PAT here. The PAT arrives per request in the /extract
     # body and is written to a 0600 credential file that is deleted as soon
     # as git no longer needs it. Baking it into the container environment
@@ -53,11 +55,12 @@ services:
       # not (see the leased-workspace item in MERA-session-status.md §3), so
       # this will grow if you use /clone directly.
       - mera-work:/work
+      - ./logs:/var/log/mera-extractor
 
     # mx is .NET and reads a whole Mendix model into memory. 2G is comfortable
     # for a ~1,000-unit app; drop it and you get an OOM kill that surfaces as a
     # mysteriously dead subprocess rather than a clear error.
-    mem_limit: 2g
+    mem_limit: 4g
     cpus: 8
 
     healthcheck:

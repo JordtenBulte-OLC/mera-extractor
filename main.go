@@ -2,15 +2,17 @@
 package main
 
 import (
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"strconv"
+
 	"github.com/joho/godotenv"
 
 	"mera-extractor/internal/api"
-	"mera-extractor/internal/mxcli"
 	"mera-extractor/internal/mx"
+	"mera-extractor/internal/mxcli"
 )
 
 func main() {
@@ -29,7 +31,7 @@ func main() {
 	}
 
 	if _, err := mx.Highest(mxRoot); err != nil {
-    	log.Printf("warning: no usable mx binary found under %s: %v", mxRoot, err)
+		log.Printf("warning: no usable mx binary found under %s: %v", mxRoot, err)
 	}
 
 	port := os.Getenv("PORT")
@@ -42,6 +44,15 @@ func main() {
 			mxcli.SetMaxConcurrent(n)
 		} else {
 			log.Printf("MERA_MXCLI_CONCURRENCY=%q invalid, keeping default (runtime.NumCPU())", v)
+		}
+	}
+
+	if p := os.Getenv("MERA_LOG_FILE"); p != "" {
+		f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			log.Printf("warning: could not open log file %s, logging to stdout only: %v", p, err)
+		} else {
+			log.SetOutput(io.MultiWriter(os.Stdout, f))
 		}
 	}
 

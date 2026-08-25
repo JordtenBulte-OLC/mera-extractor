@@ -3,6 +3,7 @@
 /extractor
 build.log
 .local
+/logs/*
 
 # Exclude the Mendix binaries as they are huge
 /.mx-binaries
