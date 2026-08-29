@@ -42,6 +42,17 @@ services:
 
       MERA_LOG_FILE: "/var/log/mera-extractor/extractor.log"
 
+      # Mirror of the Dockerfile ENV, restated here for visibility. Stops a
+      # crashing mx child from writing a ~1.8 GB .NET minidump into /work.
+      DOTNET_DbgEnableMiniDump: "0"
+
+      # How long a clone workspace may sit idle before the workspace janitor
+      # reclaims it. Default 30m. /extract cleans up its own workspace long
+      # before this; the TTL is the backstop for a killed request and the
+      # only reaper for a standalone /clone. Raise it if you drive /clone
+      # interactively and need the checkout to live longer between calls.
+      # MERA_WORKSPACE_TTL: "30m"
+
     # NEVER put MERA_PAT here. The PAT arrives per request in the /extract
     # body and is written to a 0600 credential file that is deleted as soon
     # as git no longer needs it. Baking it into the container environment
@@ -53,8 +64,11 @@ services:
       # and can be dropped with `docker compose down -v` when it grows.
       #
       # /extract cleans up after itself; a standalone /clone deliberately does
-      # not (see the leased-workspace item in MERA-session-status.md §3), so
-      # this will grow if you use /clone directly.
+      # not (see the leased-workspace item in MERA-session-status.md §3). Both
+      # now land under a per-instance subdir that the workspace janitor
+      # sweeps: anything idle past MERA_WORKSPACE_TTL is reclaimed, so this
+      # volume no longer grows without bound. `docker compose down -v` still
+      # drops it wholesale.
       - mera-work:/work
       - ./logs:/var/log/mera-extractor
 
@@ -63,6 +77,14 @@ services:
     # mysteriously dead subprocess rather than a clear error.
     mem_limit: 4g
     cpus: 8
+
+    # A .NET stack overflow in an mx child aborts with SIGABRT. Without this
+    # the kernel writes a full core (~1.8 GB) into the child's cwd under
+    # /work; a repeatedly-crashing model then fills the volume in minutes.
+    # DOTNET_DbgEnableMiniDump=0 (above) covers createdump's own minidump;
+    # this covers the kernel path. Neither is needed for normal operation.
+    ulimits:
+      core: 0
 
     healthcheck:
       # /health calls mxcli.Version, which queues behind the same global
@@ -78,56 +100,19 @@ services:
 
     restart: unless-stopped
 
-  # Debug variant of the same service — a `dlv --headless` process wrapping
-  # an unoptimized (-gcflags="all=-N -l") build of the extractor, per the
-  # `debug` stage in the Dockerfile. Not started by a plain `docker compose
-  # up`; the `debug` profile keeps it opt-in, and it shares the 8081 host
-  # port with `extractor` above, so run one or the other, never both:
+  # There is no separate debug service. For a debuggable build of THIS service,
+  # layer docker-compose.debug.yml on top — it swaps the build target to `debug`
+  # and adds delve on :2345, while keeping the 8081 URL Mendix already calls:
   #
-  #   docker compose --profile debug up -d --build extractor-debug
+  #   docker compose -f docker-compose.yml -f docker-compose.debug.yml up --build
   #
-  # dlv pauses the process at start — nothing runs, including /health —
-  # until an IDE attaches on 2345 and issues `continue`. Set breakpoints
-  # first, then continue, then send the request from Mendix.
-  extractor-debug:
-    profiles: ["debug"]
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: debug
-    image: mera-extractor:debug
-    container_name: mera-extractor-debug
-
-    # dlv exec ptraces the target process; Docker's default capability set
-    # excludes that regardless of the container's user. If dlv still fails
-    # to attach after this, the host's seccomp profile is blocking the
-    # ptrace syscall itself — add `security_opt: ["seccomp=unconfined"]`.
-    cap_add:
-      - SYS_PTRACE
-
-    ports:
-      - "8081:8080"   # same URL Mendix already calls — see extractor above
-      - "2345:2345"   # dlv's debug protocol — point your IDE here
-
-    environment:
-      PORT: "8080"
-      MERA_WORK_ROOT: "/work"
-      MERA_MX_ROOT: "/opt/mx"
-      MERA_MXCLI_CONCURRENCY: "8"
-      MERA_LOG_FILE: "/var/log/mera-extractor/extractor.log"
-
-    volumes:
-      - mera-work:/work
-      - ./logs:/var/log/mera-extractor
-
-    mem_limit: 4g
-    cpus: 8
-
-    # No healthcheck: the process is meant to sit paused pre-`continue`,
-    # which a healthcheck would just report as unhealthy noise.
-    # No restart policy: this is a manual, on-demand debug session, not a
-    # long-running service — let it stop when dlv or the debugger does.
-    restart: "no"
+  # Because it overrides `extractor` rather than adding a second service, there
+  # is only ever one `mera-extractor` container and one :8081 binding — running
+  # normal and debug at the same time is impossible by construction.
+  #
+  # dlv pauses the process at start — nothing runs, including /health — until an
+  # IDE attaches on 2345 and issues `continue`. Set breakpoints first, then
+  # continue, then send the request from Mendix.
 
 volumes:
   mera-work:

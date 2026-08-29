@@ -83,6 +83,15 @@ func IsVersionMigrationFailure(stderr string) bool {
 // Analyze runs `mx analyze-mpr` and extracts the Mendix version plus the
 // snapshot's unit-type inventory.
 //
+// NOT CURRENTLY WIRED IN. PrepareMpr moved to ShowVersion after analyze-mpr
+// was found to abort the whole process with an unbounded-recursion stack
+// overflow in MprStats on some real models (SIGABRT, exit 134 — see
+// MERA-session-status.md). This function and its parser are kept intact,
+// with their tests, because analyze-mpr's UnitTypeCounts inventory is the
+// only source for that data and is likely wanted again once Mendix fixes the
+// crash. Re-wire it in PrepareMpr behind an abort-detecting fallback to
+// ShowVersion if you bring it back.
+//
 // analyze-mpr is confirmed version-agnostic — a single mx build correctly read
 // an 11.10.0-authored file during this project's own $ID/Associations
 // investigation — so this is meant to be called with whatever Highest()

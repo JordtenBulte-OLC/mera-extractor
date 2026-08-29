@@ -102,6 +102,15 @@ RUN useradd -m -u 10001 extractor
 USER extractor
 WORKDIR /work
 ENV MERA_WORK_ROOT=/work
+
+# mx / mxbuild are .NET. On an unhandled crash — a stack overflow in
+# MprStats on some models does exactly this (see MERA-session-status.md's
+# analyze-mpr incident) — the runtime's createdump writes a full-heap
+# minidump, ~1.8 GB, into the child's working directory under /work. We do
+# not debug the .NET side from cores; turn them off. The kernel-core path is
+# closed separately by `ulimits: core: 0` in docker-compose.yml.
+ENV DOTNET_DbgEnableMiniDump=0
+
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/extractor"]
 
@@ -118,5 +127,11 @@ USER root
 COPY --from=delve /go/bin/dlv /usr/local/bin/dlv
 COPY --from=build-debug /out/extractor-debug /usr/local/bin/extractor
 USER extractor
+# 8080 (the app) is inherited from the runtime stage; 2345 is delve's protocol.
+EXPOSE 2345
+# --only-same-user=false: headless dlv otherwise rejects a TCP client that is
+# not the OS user that started the server, which an IDE attaching into the
+# container is not. Safe here because 2345 is published localhost-only.
 ENTRYPOINT ["dlv", "exec", "/usr/local/bin/extractor", \
-  "--headless", "--listen=:2345", "--api-version=2", "--accept-multiclient", "--"]
+  "--headless", "--listen=:2345", "--api-version=2", "--accept-multiclient", \
+  "--only-same-user=false", "--"]

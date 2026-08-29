@@ -77,13 +77,16 @@ func TestExtract_Integration(t *testing.T) {
 	}
 
 	// --- provenance -------------------------------------------------------
-	t.Logf("mendixVersion=%q mxVersion=%q mxcliVersion=%q",
-		resp.MendixVersion, resp.MxVersion, resp.MxcliVersion)
+	t.Logf("mendixVersion=%q mxToolsetVersion=%q mxcliVersion=%q",
+		resp.MendixVersion, resp.MxToolsetVersion, resp.MxcliVersion)
 	if resp.MendixVersion == "" {
-		t.Error("mendixVersion is empty — analyze-mpr did not report a version")
+		t.Error("mendixVersion is empty — mx show-version did not report a version")
 	}
-	if resp.MxVersion == "" {
-		t.Error("mxVersion is empty — no binary was selected")
+	// A 200 already proves a binary was selected (a resolve failure is the 422
+	// caught above). mxToolsetVersion is omitted in the normal exact-match
+	// case; if it IS present it must genuinely differ from the app version.
+	if resp.MxToolsetVersion != "" && resp.MxToolsetVersion == resp.MendixVersion {
+		t.Errorf("mxToolsetVersion is set but equals mendixVersion — it should have been omitted")
 	}
 	if resp.RequestID != "integration-1" {
 		t.Errorf("requestId = %q, not echoed back", resp.RequestID)

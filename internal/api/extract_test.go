@@ -483,11 +483,36 @@ func TestExtract_HeadVersionSelectsTheBinary(t *testing.T) {
 	}
 	resp := decodeExtract(t, h.postDefault())
 
-	if resp.MxVersion != "11.13.0" || resp.MendixVersion != "11.13.0" {
-		t.Errorf("head version should win: mxVersion=%q mendixVersion=%q", resp.MxVersion, resp.MendixVersion)
+	if resp.MendixVersion != "11.13.0" {
+		t.Errorf("head version should win: mendixVersion=%q", resp.MendixVersion)
+	}
+	// Exact-match resolution: the toolset build equals the app version, so
+	// nothing extra is reported.
+	if resp.MxToolsetVersion != "" {
+		t.Errorf("mxToolsetVersion should be omitted when it matches mendixVersion, got %q", resp.MxToolsetVersion)
 	}
 	if !hasWarning(resp, "base is Mendix 11.12.0 but head is 11.13.0") {
 		t.Errorf("a version mismatch must be warned about, got %v", resp.Warnings)
+	}
+}
+
+// TestExtract_MxToolsetVersionOnlyWhenItDiffers pins the divergence case: the
+// resolved mx toolset build is not the app's Mendix version (a pinned matrix
+// entry, a hotfix build, or a future non-exact resolver). Then — and only
+// then — mxToolsetVersion appears in the response.
+func TestExtract_MxToolsetVersionOnlyWhenItDiffers(t *testing.T) {
+	h := newHarness(t)
+	h.srv.Deps.MxResolve = func(mxRoot, v string) (mx.Binary, error) {
+		return mx.Binary{Version: "11.13.0-hotfix2", Path: "/opt/mx/11.13.0-hotfix2/modeler/mx"}, nil
+	}
+
+	resp := decodeExtract(t, h.postDefault())
+
+	if resp.MendixVersion != "11.13.0" {
+		t.Errorf("mendixVersion = %q, want 11.13.0", resp.MendixVersion)
+	}
+	if resp.MxToolsetVersion != "11.13.0-hotfix2" {
+		t.Errorf("mxToolsetVersion = %q, want it surfaced when it differs from the app version", resp.MxToolsetVersion)
 	}
 }
 
@@ -984,7 +1009,7 @@ func TestExtract_EscapeHatchReturnsTheOldShape(t *testing.T) {
 	}
 
 	body := w.Body.String()
-	for _, absent := range []string{"changeUnits", "mendixVersion", "mxVersion"} {
+	for _, absent := range []string{"changeUnits", "mendixVersion", "mxToolsetVersion"} {
 		if strings.Contains(body, absent) {
 			t.Errorf("legacy response leaked the new field %q: %s", absent, body)
 		}

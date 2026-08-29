@@ -29,9 +29,12 @@ func (s *Server) handleClone(w http.ResponseWriter, r *http.Request) {
 		respondError(w, r, http.StatusBadGateway, err) // upstream (git) failed, not our code
 		return
 	}
-	// Note: this clone is NOT cleaned up here — the whole point of a
-	// standalone /clone is that the caller uses WorkDir afterward (e.g.
-	// against /describe). Nothing currently reaps it. That's a known gap —
-	// see "What's still open" at the end of this guide.
+	// This clone is NOT cleaned up here — the whole point of a standalone
+	// /clone is that the caller uses WorkDir afterward (e.g. against
+	// /describe). It is no longer an unbounded leak: it lands under the
+	// per-instance workspace dir (s.WorkRoot is workspace.Manager.Dir()), so
+	// the janitor reclaims it once it has been idle past MERA_WORKSPACE_TTL
+	// (default 30m). A caller that needs it to live longer is asking for the
+	// leased-workspace feature in manual §1.8, which is still unbuilt.
 	writeJSON(w, http.StatusOK, result)
 }

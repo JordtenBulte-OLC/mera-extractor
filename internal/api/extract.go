@@ -68,14 +68,42 @@ type changeUnit struct {
 type extractResponse struct {
 	RequestID string `json:"requestId,omitempty"`
 
+	// MendixVersion is a fact about the SUBJECT: the Studio Pro version the
+	// head commit's .mpr was last edited with (from `mx show-version`). A
+	// consumer uses it to caption the diff and decide which metamodel rules
+	// apply.
 	MendixVersion string `json:"mendixVersion,omitempty"`
+
+	// StorageFormat is intentionally empty for now — see the populate site.
 	StorageFormat string `json:"storageFormat,omitempty"`
-	MxcliVersion  string `json:"mxcliVersion,omitempty"`
-	MxVersion     string `json:"mxVersion,omitempty"`
+
+	// MxcliVersion and MxToolsetVersion are PROVENANCE, not facts about the
+	// app: which tool builds generated this payload.
+	//
+	// MxcliVersion — the `mxcli` build that rendered beforeMdl / afterMdl.
+	//
+	// MxToolsetVersion — the `mx` toolset build ("Mx Toolset vX.Y.Z") that
+	// ran the diff. Populated ONLY when it differs from MendixVersion: with
+	// MxResolve's exact-match rule (manual §1.3, no substitution) the two are
+	// normally the same string, and echoing it back then is just noise next
+	// to mendixVersion. A value present here means the diff was produced by a
+	// toolset build that does not match the app — worth flagging.
+	MxcliVersion     string `json:"mxcliVersion,omitempty"`
+	MxToolsetVersion string `json:"mxToolsetVersion,omitempty"`
 
 	ChangeUnits []changeUnit      `json:"changeUnits"`
 	TextDiffs   []gitops.TextDiff `json:"textDiffs,omitempty"`
 	Warnings    []string          `json:"warnings,omitempty"`
+}
+
+// mxToolsetVersionForResponse returns the mx toolset version to put in the
+// response, which is nothing at all when it matches the app's own Mendix
+// version. See extractResponse.MxToolsetVersion for why.
+func mxToolsetVersionForResponse(mendixVersion, toolsetVersion string) string {
+	if toolsetVersion == mendixVersion {
+		return ""
+	}
+	return toolsetVersion
 }
 
 // legacyExtractResponse is the pre-Stage-8 shape, kept byte-identical for the
@@ -173,6 +201,7 @@ var diffTypeToMxcli = map[string]string{
 	"Workflows$Workflow":  "workflow",
 	"Pages$Layout":        "layout",
 	"Pages$BuildingBlock": "buildingblock",
+	"Queues$Queue":        "queue",
 
 	// Deliberately NOT mapped, though mxcli has types for them: the remaining
 	// entries in `mxcli describe --help` (settings, projectsecurity, userrole,
@@ -256,6 +285,14 @@ func (s *Server) handleExtract(w http.ResponseWriter, r *http.Request) {
 	// filling up over many requests.
 	defer d.Cleanup(clone.WorkDir)
 
+	// Heartbeat the workspace for as long as this request holds it, so a slow
+	// extraction is not mistaken for an orphan and reaped mid-flight by the
+	// janitor. Registered after Cleanup so it runs first (defers are LIFO):
+	// the heartbeat goroutine stops before the dir is removed. Nil-safe when
+	// no workspace manager is wired — every handler test hits that path.
+	stopHeartbeat := s.Workspace.Track(clone.WorkDir)
+	defer stopHeartbeat()
+
 	if len(req.Units) > 0 || len(req.Modules) > 0 {
 		s.extractNaive(ctx, w, r, d, req, clone)
 		return
@@ -296,6 +333,12 @@ func (s *Server) extractDiff(ctx context.Context, w http.ResponseWriter, r *http
 	// was a 422 gate until a real run rejected every commit of the test app;
 	// see mx.ErrUnsupportedVersionMigrationCommit for the full story. The
 	// authoritative signal is mx actually failing to parse, handled at Diff below.
+	//
+	// NOTE: currently inert — PrepareMpr reads the version via `mx show-version`
+	// now (analyze-mpr crashes on some models), and show-version does not report
+	// the unit inventory, so HasProjectConversion is always false here. The Diff
+	// failure path below is unaffected and remains the real signal. Kept wired so
+	// it lights up again if analyze-mpr is ever restored to PrepareMpr.
 	if headInfo.HasProjectConversion || baseInfo.HasProjectConversion {
 		warnings = append(warnings, "a Projects$ProjectConversion unit is present "+
 			"(a record of a past Studio Pro upgrade); proceeding")
@@ -369,12 +412,12 @@ func (s *Server) extractDiff(ctx context.Context, w http.ResponseWriter, r *http
 		// StorageFormat is intentionally empty: mx.AnalyzeResult does not
 		// expose it, and inventing "MPRv2" would be a fabricated provenance
 		// field. Populate once analyze-mpr's raw output is confirmed to carry it.
-		StorageFormat: "",
-		MxcliVersion:  mxcliVer,
-		MxVersion:     bin.Version,
-		ChangeUnits:   units,
-		TextDiffs:     textDiffs,
-		Warnings:      warnings,
+		StorageFormat:    "",
+		MxcliVersion:     mxcliVer,
+		MxToolsetVersion: mxToolsetVersionForResponse(headInfo.MendixVersion, bin.Version),
+		ChangeUnits:      units,
+		TextDiffs:        textDiffs,
+		Warnings:         warnings,
 	})
 }
 

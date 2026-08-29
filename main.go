@@ -2,17 +2,20 @@
 package main
 
 import (
+	"context"
 	"io"
 	"log"
 	"net/http"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/joho/godotenv"
 
 	"mera-extractor/internal/api"
 	"mera-extractor/internal/mx"
 	"mera-extractor/internal/mxcli"
+	"mera-extractor/internal/workspace"
 )
 
 func main() {
@@ -56,9 +59,31 @@ func main() {
 		}
 	}
 
-	srv := api.NewServer(workRoot, mxRoot)
+	var wsOpts []workspace.Option
+	if v := os.Getenv("MERA_WORKSPACE_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			wsOpts = append(wsOpts, workspace.WithTTL(d))
+		} else {
+			log.Printf("MERA_WORKSPACE_TTL=%q invalid, keeping default %s", v, workspace.DefaultTTL)
+		}
+	}
+	wsm, err := workspace.New(workRoot, wsOpts...)
+	if err != nil {
+		// Without a writable workspace dir the service cannot clone anything.
+		log.Fatalf("workspace init under %s: %v", workRoot, err)
+	}
+	// context.Background() is deliberate: the janitor's lifetime is the
+	// process's. main ends with log.Fatal(ListenAndServe), so there is no
+	// graceful-shutdown path to thread a cancel through, and a reap killed
+	// mid-tick leaves at worst a half-removed clone-* dir that the next tick
+	// (or the next startup sweep) finishes.
+	wsm.StartJanitor(context.Background())
+	log.Printf("workspace ready: %s", wsm.Describe())
+
+	srv := api.NewServer(wsm.Dir(), mxRoot)
+	srv.Workspace = wsm
 
 	addr := ":" + port
-	log.Printf("extractor listening on %s (workRoot=%s)", addr, workRoot)
+	log.Printf("extractor listening on %s (workRoot=%s)", addr, wsm.Dir())
 	log.Fatal(http.ListenAndServe(addr, srv.Routes()))
 }

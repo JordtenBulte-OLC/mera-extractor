@@ -78,7 +78,7 @@ func TestPrepareMpr_SucceedsWithoutRetry(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	bin := writeStubMx(t, "Mendix version: 11.13.0\n", "", 0)
+	bin := writeStubMx(t, "11.13.0\n", "", 0) // `mx show-version` prints a bare M.m.p line
 
 	mprPath, result, err := PrepareMpr(context.Background(), bin, dir)
 	if err != nil {
@@ -113,7 +113,7 @@ case "$last" in
     exit 1
     ;;
   */App.mpr)
-    echo "Mendix version: 11.13.0"
+    echo "11.13.0"
     exit 0
     ;;
   *)

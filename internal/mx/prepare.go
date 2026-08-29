@@ -56,24 +56,39 @@ func copyFile(src, dst string) (err error) {
 	return nil
 }
 
-// PrepareMpr resolves the checkout's .mpr file and runs Analyze against
-// it, transparently working around the on-disk-filename vs.
-// internal-self-reference mismatch (Step 3): if the first Analyze call
-// fails with that specific error, it copies the .mpr to the name mx wants
-// and retries exactly once.
+// PrepareMpr resolves the checkout's .mpr file and reads its Mendix version
+// via `mx show-version`, transparently working around the on-disk-filename
+// vs. internal-self-reference mismatch (Step 3): if the first call fails
+// with that specific error, it copies the .mpr to the name mx wants and
+// retries exactly once.
+//
+// ▶ Why show-version and not analyze-mpr, which this used to call: see
+// ShowVersion's doc comment — analyze-mpr aborts the whole process with a
+// stack overflow on some real models, and the version was the only thing
+// PrepareMpr ever needed from it. The returned AnalyzeResult therefore now
+// carries ONLY MendixVersion: UnitTypeCounts is empty and
+// HasProjectConversion is always false. Neither was load-bearing —
+// UnitTypeCounts has no reader, and the authoritative mid-migration signal
+// is a failed `mx diff` (see IsVersionMigrationFailure), not a pre-check.
 func PrepareMpr(ctx context.Context, bin Binary, dir string) (mprPath string, result AnalyzeResult, err error) {
 	mprPath, err = gitops.FindMpr(dir)
 	if err != nil {
 		return
 	}
-	result, err = Analyze(ctx, bin, mprPath)
+
+	var version string
+	version, err = ShowVersion(ctx, bin, mprPath)
 	if wantName, ok := parseSelfReferenceMismatch(err); ok {
 		renamed := filepath.Join(dir, wantName)
 		if cpErr := copyFile(mprPath, renamed); cpErr != nil {
-			return mprPath, result, err
+			return mprPath, result, err // keep the original mismatch error
 		}
 		mprPath = renamed
-		result, err = Analyze(ctx, bin, mprPath) // retry once
+		version, err = ShowVersion(ctx, bin, mprPath) // retry once
 	}
-	return
+	if err != nil {
+		return mprPath, AnalyzeResult{}, err
+	}
+	result = AnalyzeResult{MendixVersion: version}
+	return mprPath, result, nil
 }

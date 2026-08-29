@@ -1,0 +1,49 @@
+# docker-compose.debug.yml — debug overlay for the `extractor` service.
+#
+# Layer it ON TOP of docker-compose.yml; it does not stand alone:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.debug.yml up --build
+#
+# It redefines the SAME `extractor` service rather than adding a second one, so:
+#   - there is only ever one `mera-extractor` container and one :8081 binding
+#   - the URL Mendix calls (http://localhost:8081) does not change
+#   - normal and debug cannot run at once — `up` reconciles the single container
+#     to whichever -f file set you pass
+#
+# Only the fields that differ from the base are listed here. Everything else
+# (ports 8081:8080, environment, volumes, mem_limit, cpus, container_name) is
+# merged in from docker-compose.yml. Compose deep-merges mappings and
+# CONCATENATES `ports`, so the 2345 mapping below is ADDED to the inherited
+# 8081:8080 — it does not replace it.
+#
+# dlv starts the process PAUSED. Nothing runs — not even /health — until your
+# IDE attaches on 127.0.0.1:2345 and issues `continue`. Set breakpoints first.
+
+services:
+  extractor:
+    build:
+      target: debug          # base uses `runtime`; context/dockerfile carry over
+    image: mera-extractor:debug   # separate tag, so the :local image is untouched
+
+    # dlv exec ptraces the target process; Docker's default capability set drops
+    # that regardless of the container's user. If attach still fails after this,
+    # the host's seccomp profile is blocking the ptrace syscall itself — add
+    # `security_opt: ["seccomp=unconfined"]` here.
+    cap_add:
+      - SYS_PTRACE
+
+    ports:
+      # delve's debug protocol — point your IDE's remote-attach at 127.0.0.1:2345.
+      # localhost-only on purpose: a delve client can execute arbitrary code
+      # inside the container, so it must not be reachable off-host. The app port
+      # stays exactly as the base file defines it (8081:8080).
+      - "127.0.0.1:2345:2345"
+
+    # The process sits paused pre-`continue`; a healthcheck would just report
+    # that as unhealthy noise. `disable: true` overrides the inherited check.
+    healthcheck:
+      disable: true
+
+    # Manual, on-demand session — not a long-running service. Let it stop when
+    # dlv or the debugger does, instead of looping on the base restart policy.
+    restart: "no"
