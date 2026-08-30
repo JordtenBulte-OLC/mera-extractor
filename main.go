@@ -13,6 +13,7 @@ import (
 	"github.com/joho/godotenv"
 
 	"mera-extractor/internal/api"
+	"mera-extractor/internal/logrotate"
 	"mera-extractor/internal/mx"
 	"mera-extractor/internal/mxcli"
 	"mera-extractor/internal/workspace"
@@ -51,11 +52,25 @@ func main() {
 	}
 
 	if p := os.Getenv("MERA_LOG_FILE"); p != "" {
-		f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		// Rotate on the calendar-day boundary and at a size cap, so
+		// /logs/extractor.log never grows without bound. Files are named
+		// extractor-YYYY-MM-DD.log, with a .N iterator when a day needs more
+		// than one file (see internal/logrotate).
+		maxBytes := int64(10 << 20)
+		if v := os.Getenv("MERA_LOG_MAX_BYTES"); v != "" {
+			if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+				maxBytes = n
+			} else {
+				log.Printf("MERA_LOG_MAX_BYTES=%q invalid, keeping default %d", v, maxBytes)
+			}
+		}
+		w, err := logrotate.New(p, maxBytes)
 		if err != nil {
 			log.Printf("warning: could not open log file %s, logging to stdout only: %v", p, err)
 		} else {
-			log.SetOutput(io.MultiWriter(os.Stdout, f))
+			// stdout first: if the log disk fills or turns read-only, the
+			// container still gets console output before MultiWriter aborts.
+			log.SetOutput(io.MultiWriter(os.Stdout, w))
 		}
 	}
 

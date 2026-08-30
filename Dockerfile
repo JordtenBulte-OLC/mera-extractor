@@ -134,4 +134,4 @@ EXPOSE 2345
 # container is not. Safe here because 2345 is published localhost-only.
 ENTRYPOINT ["dlv", "exec", "/usr/local/bin/extractor", \
   "--headless", "--listen=:2345", "--api-version=2", "--accept-multiclient", \
-  "--only-same-user=false", "--"]
+  "--only-same-user=false", "--", "--continue"]
