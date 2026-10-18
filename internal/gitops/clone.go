@@ -93,9 +93,29 @@ func Cleanup(workDir string) error {
 	return os.RemoveAll(workDir)
 }
 
-func runGit(ctx context.Context, dir, helperPath string, args ...string) error {
+// gitWaitDelay bounds how long a git command's Wait may keep reading output
+// after the process was killed or exited. Package-level so a test can shrink it.
+//
+// ▶ Why it's needed even with ownProcessGroup: Wait does not return when the
+// process exits, it returns when the stdout/stderr pipes hit EOF — and any
+// surviving descendant still holds them. Without a WaitDelay that is an
+// unbounded hang in the HTTP handler (the 2026-10-18 incident: no "←" log line
+// at all, long after the deadline). ownProcessGroup kills the descendants;
+// this is the backstop for the ones it can't (another group, or non-unix).
+var gitWaitDelay = 5 * time.Second
+
+// newGitCmd is the one place git subprocesses are built, so the kill and
+// wait behaviour above applies to every call in this package.
+func newGitCmd(ctx context.Context, dir string, env []string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
+	cmd.Env = env
+	cmd.WaitDelay = gitWaitDelay
+	ownProcessGroup(cmd)
+	return cmd
+}
+
+func runGit(ctx context.Context, dir, helperPath string, args ...string) error {
 	env := append(os.Environ(),
 		"GIT_TERMINAL_PROMPT=0", // never hang on an interactive credential prompt
 	)
@@ -109,10 +129,16 @@ func runGit(ctx context.Context, dir, helperPath string, args ...string) error {
 			"GIT_CONFIG_VALUE_0=store --file="+helperPath,
 		)
 	}
-	cmd.Env = env
-	out, err := cmd.CombinedOutput()
+	out, err := newGitCmd(ctx, dir, env, args...).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("git %v: %s", args, string(out))
+		// Name the cause. A killed git's output is often just progress lines
+		// ("Updating files: 72%..."), which on their own read like success; a
+		// deadline is the thing the reader actually needs to see.
+		cause := err
+		if ctx.Err() != nil {
+			cause = ctx.Err()
+		}
+		return fmt.Errorf("git %v: %w: %s", args, cause, string(out))
 	}
 	return nil
 }

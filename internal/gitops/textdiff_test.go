@@ -266,8 +266,13 @@ func TestTextDiffs_RejectsMalformedSha(t *testing.T) {
 }
 
 // TextDiffs must work against CloneBoth's bare repo, which is how /extract
-// will call it — diffing two commits needs no working tree, and every blob is
-// already local because both worktrees were checked out.
+// will call it — diffing two commits needs no working tree, and every blob it
+// needs is already local because CloneBoth prefetched it.
+//
+// The source repo is moved away before TextDiffs runs. Without that, a missing
+// blob would just be lazily fetched from the still-reachable file:// remote
+// and the test would pass while proving nothing: in production that same
+// lazy fetch has no credentials and fails.
 func TestTextDiffs_WorksAgainstCloneBothsBareRepo(t *testing.T) {
 	src, base, head := textFixture(t)
 	// Enable the two server-side settings a raw-SHA partial fetch needs.
@@ -290,11 +295,28 @@ func TestTextDiffs_WorksAgainstCloneBothsBareRepo(t *testing.T) {
 	if res.RepoDir == "" {
 		t.Fatal("CloneBothResult must expose RepoDir for TextDiffs to use")
 	}
+	// The same diff against the full source repo is the expected answer: every
+	// file, including the rename (which needs -M's blobs) and the binary.
+	want, err := TextDiffs(context.Background(), src, base, head, nil)
+	if err != nil {
+		t.Fatalf("TextDiffs against the source repo: %v", err)
+	}
+	if err := os.Rename(src, src+"-gone"); err != nil {
+		t.Fatal(err)
+	}
 	diffs, err := TextDiffs(context.Background(), res.RepoDir, base, head, nil)
 	if err != nil {
 		t.Fatalf("TextDiffs against the bare repo: %v", err)
 	}
 	got := byPath(diffs)
+	for path, w := range byPath(want) {
+		if got[path] != w {
+			t.Errorf("%s: bare-repo diff differs from the full repo's", path)
+		}
+	}
+	if len(diffs) != len(want) {
+		t.Errorf("got %d diffs, want %d: %v", len(diffs), len(want), keys(got))
+	}
 	if _, ok := got["javasource/sales/Keep.java"]; !ok {
 		t.Errorf("expected the java change, got %v", keys(got))
 	}

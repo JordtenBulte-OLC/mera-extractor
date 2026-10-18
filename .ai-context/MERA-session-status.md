@@ -45,6 +45,8 @@ Proven on 2026-08-23 against the real repo: **2 change units instead of 1,037**,
 
 ## 3. Open items
 
+**2026-10-18 — `/extract` timeout incident, fixed, awaiting a real re-run.** A commit pair with several marketplace-module updates hit `cloneBothTimeout` (300s): the full base checkout pulled ~100 MB from Team Server at ~200 KB/s. Then the handler hung past its deadline, because the killed `git worktree add`'s descendants kept downloading and held the output pipe. Three fixes: (1) git runs in its own process group, killed whole on timeout, with `WaitDelay` as a backstop; compose gets `init: true`. (2) Worktrees are sparse, model only (`*.mpr`, `mprcontents/`), with a credentialed prefetch of exactly the blobs `TextDiffs` needs; `MERA_CLONE_TIMEOUT` makes the deadline configurable. (3) The healthcheck called `wget`, which the image doesn't have, so every container had always shown "unhealthy" — **correction, logged:** compose presented that check as working; it never was. Now it uses `curl`. Details in design notes. **Still to verify:** re-run that same commit pair from Mendix and confirm `mx`/`mxcli` need nothing beyond the model files.
+
 **Not blocking, but real:**
 
 - **`/clone`'s workDir is never reaped.** Sits on disk until the container restarts. Fine for local testing, must be solved before unattended operation — this is what manual §1.8's leased workspaces exist for. `/extract` is fine; its whole lifecycle fits in one request.

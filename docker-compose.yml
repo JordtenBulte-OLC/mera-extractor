@@ -53,6 +53,12 @@ services:
       # interactively and need the checkout to live longer between calls.
       # MERA_WORKSPACE_TTL: "30m"
 
+      # Deadline for /extract's clone step (fetch + both model checkouts +
+      # text-diff prefetch). Default 5m. Whatever calls /extract must wait
+      # LONGER than this, or the caller gives up first and never sees the
+      # extractor's own timeout error.
+      # MERA_CLONE_TIMEOUT: "5m"
+
     # NEVER put MERA_PAT here. The PAT arrives per request in the /extract
     # body and is written to a 0600 credential file that is deleted as soon
     # as git no longer needs it. Baking it into the container environment
@@ -86,13 +92,26 @@ services:
     ulimits:
       core: 0
 
+    # A tiny init (tini) as PID 1 instead of the extractor. Any subprocess
+    # that outlives its parent is re-parented to PID 1; without an init that
+    # is the extractor, which never reaps them, so they linger as zombies.
+    # gitops already kills git's whole process group on timeout — this is the
+    # backstop for every other child (mx, mxcli, createdump).
+    init: true
+
     healthcheck:
       # /health calls mxcli.Version, which queues behind the same global
       # subprocess semaphore as everything else — so under a loaded extraction
       # it can be slow to answer. That is real backpressure, not a fault, which
       # is why the timeout here is generous and start_period is long enough to
       # cover container boot.
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/health"]
+      #
+      # Correction, logged 2026-10-18: this used to run wget, which the
+      # runtime image does not contain (it installs curl), so the check could
+      # never pass — every container showed "unhealthy" while /health itself
+      # answered 200 "ok". --max-time sits under `timeout` so curl reports the
+      # failure itself instead of being killed mid-request.
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "--max-time", "15", "http://localhost:8080/health"]
       interval: 30s
       timeout: 20s
       retries: 3

@@ -25,10 +25,36 @@ type CloneBothResult struct {
 }
 
 // cloneBothTimeout is generous compared with Clone's 120s: this does one
-// fetch and two full checkouts of a Mendix app, and with a blob:none partial
-// clone each `worktree add` pays its own lazy-blob round trip. Package-level
-// so a test can shrink it.
+// fetch, two model-only checkouts and one text-diff prefetch, each lazy-blob
+// step its own network round trip. Package-level so a test can shrink it;
+// SetCloneBothTimeout is the startup knob (MERA_CLONE_TIMEOUT).
 var cloneBothTimeout = 300 * time.Second
+
+// SetCloneBothTimeout replaces the CloneBoth deadline. Call once at startup,
+// before serving. Whatever calls /extract must wait LONGER than this, or it
+// gives up before it can see the extractor's own clean timeout error.
+func SetCloneBothTimeout(d time.Duration) {
+	if d > 0 {
+		cloneBothTimeout = d
+	}
+}
+
+// modelPaths is the sparse-checkout set for both worktrees, in non-cone
+// (gitignore-style) syntax: everything mx and mxcli read, and nothing else.
+// mprcontents/ is the MPRv2 per-unit store; absent on MPRv1 apps, harmless.
+//
+// ▶ Why not javasource/, theme/ etc. as well: nothing reads them from a
+// worktree. TextDiffs works on the object store, and needs only the blobs
+// that CHANGED — prefetchTextDiffBlobs pulls exactly those. Checking the
+// folders out would download every unchanged Java file, every jar in
+// userlib/ and every widget .mpk, twice, which is what a marketplace-module
+// update turned into a 300s timeout on 2026-10-18.
+//
+// UNVERIFIED against a real app beyond the .mpr itself: if mx or mxcli turns
+// out to read something else from the project directory (widgets/*.mpk is
+// the likeliest candidate), it fails loudly in PrepareMpr/Diff/Describe, and
+// the fix is one more entry here.
+var modelPaths = []string{"*.mpr", "mprcontents/"}
 
 // CloneBoth materialises two commits of the same repository side by side, so
 // `mx diff` has a real base and a real head to compare.
@@ -86,21 +112,39 @@ func CloneBoth(ctx context.Context, workRoot string, req CloneBothRequest) (Clon
 	baseDir := filepath.Join(workDir, "base")
 	headDir := filepath.Join(workDir, "head")
 
-	steps := [][]string{
-		{"init", "--bare"},
-		{"remote", "add", "origin", req.RepoURL},
+	type step struct {
+		dir  string
+		args []string
+	}
+	steps := []step{
+		{repoDir, []string{"init", "--bare"}},
+		{repoDir, []string{"remote", "add", "origin", req.RepoURL}},
 		// One fetch, both commits. Fetching by raw object name requires the
 		// server to allow unadvertised wants; Team Server does, which is what
 		// Clone has been relying on all along.
-		{"fetch", "--filter=blob:none", "--no-tags", "origin", req.BaseSha, req.HeadSha},
-		// --detach is explicit. Without it `worktree add <path> <commit-ish>`
-		// will DWIM a branch named after the path's basename in some cases,
-		// and we never want a branch here.
-		{"worktree", "add", "--detach", baseDir, req.BaseSha},
-		{"worktree", "add", "--detach", headDir, req.HeadSha},
+		{repoDir, []string{"fetch", "--filter=blob:none", "--no-tags", "origin", req.BaseSha, req.HeadSha}},
 	}
-	for _, args := range steps {
-		if err := runGit(ctx, repoDir, helperPath, args...); err != nil {
+	for _, side := range []struct{ dir, sha string }{{baseDir, req.BaseSha}, {headDir, req.HeadSha}} {
+		steps = append(steps,
+			// --detach is explicit. Without it `worktree add <path> <commit-ish>`
+			// will DWIM a branch named after the path's basename in some cases,
+			// and we never want a branch here. --no-checkout because the
+			// sparse set must be in place BEFORE the first checkout, or git
+			// downloads the whole tree anyway.
+			step{repoDir, []string{"worktree", "add", "--no-checkout", "--detach", side.dir, side.sha}},
+			// Per-worktree: git enables extensions.worktreeConfig on its own,
+			// so base and head each get their own sparse file and the bare
+			// repo stays unaffected. Confirmed on git 2.39 (the image's).
+			step{side.dir, append([]string{"sparse-checkout", "set", "--no-cone"}, modelPaths...)},
+			// The actual checkout. Lazily fetches the model blobs, in one
+			// batched request per side.
+			step{side.dir, []string{"reset", "--hard", "--quiet"}},
+		)
+	}
+	steps = append(steps, step{repoDir, prefetchTextDiffBlobsArgs(req.BaseSha, req.HeadSha)})
+
+	for _, s := range steps {
+		if err := runGit(ctx, s.dir, helperPath, s.args...); err != nil {
 			return fail(err)
 		}
 	}
@@ -115,4 +159,19 @@ func CloneBoth(ctx context.Context, workRoot string, req CloneBothRequest) (Clon
 	}
 
 	return CloneBothResult{WorkDir: workDir, RepoDir: repoDir, BaseDir: baseDir, HeadDir: headDir}, nil
+}
+
+// prefetchTextDiffBlobsArgs is a `git diff --numstat` over the same paths and
+// rename detection TextDiffs uses. Its output is discarded; it runs for its
+// side effect: computing line counts makes git batch-fetch every blob the real
+// diff will need, while the credential file still exists.
+//
+// ▶ Why this step exists: TextDiffs runs later with NO credentials, so any
+// blob it lacks becomes a lazy fetch that fails as an auth error far from any
+// auth code (gap analysis §5.2's trap). Before sparse checkout the full
+// worktree checkouts happened to fetch everything. Now this is the guarantee,
+// and it must stay in step with TextDiffs' pathspecs and -M.
+func prefetchTextDiffBlobsArgs(baseSha, headSha string) []string {
+	args := []string{"diff", "--numstat", "-M", baseSha, headSha, "--"}
+	return append(args, DefaultTextDiffPaths...)
 }

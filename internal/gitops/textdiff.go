@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 )
 
@@ -33,10 +32,16 @@ var maxUnifiedDiffBytes = 256 * 1024
 //
 // It runs against the repository directory — the bare repo from CloneBoth is
 // fine, since diffing two commits needs no working tree. No credentials are
-// passed: every object involved is already local, because both worktrees were
-// checked out, which materialised every blob in both trees. That matters under
-// the blob:none partial clone — if this ever did need a lazy fetch it would
-// fail, since CloneBoth removes the credential file before returning.
+// passed: every blob involved is already local because CloneBoth prefetches
+// them (prefetchTextDiffBlobsArgs) for DefaultTextDiffPaths. That matters
+// under the blob:none partial clone — a lazy fetch here would fail, since
+// CloneBoth removes the credential file before returning. So a caller passing
+// pathspecs OUTSIDE DefaultTextDiffPaths gets no such guarantee.
+//
+// Correction, logged 2026-10-18: this used to say the blobs were local
+// "because both worktrees were checked out, which materialised every blob in
+// both trees". True until the worktrees became sparse (model only); the
+// prefetch step replaced that accidental guarantee with a deliberate one.
 func TextDiffs(ctx context.Context, repoDir, baseSha, headSha string, pathspecs []string) ([]TextDiff, error) {
 	if err := validateSha("baseSha", baseSha); err != nil {
 		return nil, err
@@ -226,9 +231,7 @@ func trimDiffPath(p string) string {
 // which is fine when the output is only ever an error message, but would
 // corrupt parsed output with any stray git progress or advice text.
 func runGitOutput(ctx context.Context, dir string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cmd := newGitCmd(ctx, dir, append(os.Environ(), "GIT_TERMINAL_PROMPT=0"), args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()

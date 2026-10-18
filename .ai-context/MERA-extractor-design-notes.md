@@ -156,7 +156,21 @@ Confirmed empirically rather than assumed: after `CloneBoth`, `repo.git/config` 
 
 `git diff --unified=5 <base> <head> -- javasource theme deployment '*.json'`, run against the **bare repo** and split into one entry per file. Two subprocess calls, not N+1: `--name-status -z` for change kinds, one `--unified=5` for content split on the `diff --git ` header.
 
-**No credentials are passed, and that is safe only because both worktrees were checked out** — which materialised every blob in both trees despite the `blob:none` filter. If this ever did need a lazy fetch it would fail, since `CloneBoth` removes the credential file before returning.
+**No credentials are passed, and that is safe only because `CloneBoth` prefetched every blob `TextDiffs` will read.** Its last step is a `git diff --numstat -M base head -- <DefaultTextDiffPaths>` whose output is thrown away: computing line counts makes git batch-fetch exactly the changed blobs (and `-M`'s rename candidates) while the credential file still exists. If `TextDiffs` ever did need a lazy fetch it would fail, since `CloneBoth` removes the credential file before returning — so the prefetch must stay in step with `TextDiffs`' pathspecs and flags. `TestTextDiffs_WorksAgainstCloneBothsBareRepo` moves the source repo away before diffing, so a missing blob fails the test instead of being quietly fetched from the still-reachable `file://` remote.
+
+> **Correction, logged 2026-10-18.** This paragraph used to say the guarantee came from both worktrees being checked out in full, *"which materialised every blob in both trees"*. True until the worktrees went sparse (below). The guarantee was accidental; it is now a deliberate step with a test that would catch losing it.
+
+### Sparse, model-only worktrees (2026-10-18)
+
+Each worktree is created `--no-checkout`, given a non-cone sparse set of `*.mpr` + `mprcontents/` (`gitops.modelPaths`), then populated with `reset --hard`. **Nothing else is checked out.** `mx` and `mxcli` are the only readers of the worktrees; `TextDiffs` reads the object store. So Java and SCSS changes are still reported — through `TextDiffs`, which needs only the *changed* blobs — while unchanged Java files, `userlib/` jars and `widgets/` packages are never downloaded at all.
+
+**Why it was needed.** A commit with several marketplace-module updates (3,911 files at base) timed out: the full base checkout alone pulled ~100 MB at ~200 KB/s from Team Server and did not finish inside the 300s `cloneBothTimeout`. The model-only set also differs from the sparse list in the architecture doc's §4 (which adds `javasource/**`, `theme/**`, `deployment/**`): those folders would be downloaded in full, twice, to serve a reader that never looks at the worktree.
+
+Confirmed on git 2.39.5 (the runtime image's version — the host's 2.53 is not what ships): sparse config is per-worktree (git turns on `extensions.worktreeConfig` itself, the bare repo is unaffected), each side's checkout is **one** batched lazy fetch, and the prefetch is one more. **UNVERIFIED on a real app:** whether `mx`/`mxcli` read anything from the project directory besides the model. If they do (`widgets/*.mpk` is the likeliest), `PrepareMpr`/`Diff`/`Describe` fail loudly and the fix is one entry in `modelPaths`.
+
+### Killing git on timeout
+
+`exec.CommandContext` SIGKILLs only the direct child. A git command is a tree (`worktree add` → `reset --hard` → `fetch` → `remote-https` → `fetch-pack` → `index-pack`), and the survivors are re-parented — inside the container, to the extractor itself as PID 1. Worse, `CombinedOutput`'s `Wait` returns on pipe EOF, not process exit, and the survivors hold the pipes: the handler hung with no `←` log line for 9+ minutes after its deadline. Every git call now goes through `newGitCmd`: own process group, `Cancel` kills `-pgid`, `WaitDelay` 5s as the backstop. Compose also runs `init: true` so any other orphan (mx, mxcli, createdump) is reaped rather than left as a zombie of PID 1.
 
 Two bugs the awkward cases caught, both worth remembering:
 

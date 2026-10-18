@@ -13,6 +13,7 @@ import (
 	"github.com/joho/godotenv"
 
 	"mera-extractor/internal/api"
+	"mera-extractor/internal/gitops"
 	"mera-extractor/internal/logrotate"
 	"mera-extractor/internal/mx"
 	"mera-extractor/internal/mxcli"
@@ -71,6 +72,14 @@ func main() {
 			// stdout first: if the log disk fills or turns read-only, the
 			// container still gets console output before MultiWriter aborts.
 			log.SetOutput(io.MultiWriter(os.Stdout, w))
+		}
+	}
+
+	if v := os.Getenv("MERA_CLONE_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			gitops.SetCloneBothTimeout(d)
+		} else {
+			log.Printf("MERA_CLONE_TIMEOUT=%q invalid, keeping default", v)
 		}
 	}
 
