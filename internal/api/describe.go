@@ -20,6 +20,7 @@ func (s *Server) handleDescribe(w http.ResponseWriter, r *http.Request) {
 		respondError(w, r, http.StatusBadRequest, err)
 		return
 	}
+	annotate(r, "unitType", req.UnitType, "unit", req.QualifiedName, "mpr", req.MprPath)
 
 	resp := map[string]string{"qualifiedName": req.QualifiedName}
 	mdl, err := mxcli.Describe(r.Context(), mxcli.DescribeRequest{
@@ -27,8 +28,10 @@ func (s *Server) handleDescribe(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		resp["warning"] = err.Error() // degrade, don't fail — manual §1.4
+		annotate(r, "result", "warning")
 	} else {
 		resp["mdl"] = mdl
+		annotate(r, "result", "ok", "mdlBytes", len(mdl))
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

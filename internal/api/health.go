@@ -73,5 +73,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if resp.Status == "ok" {
+		markRoutine(r) // a healthy container probe is then not logged; see isProbe
+	}
+	annotate(r, "health", resp.Status, "mxVersions", len(resp.MxVersions), "warnings", len(resp.Warnings))
 	writeJSON(w, http.StatusOK, resp)
 }

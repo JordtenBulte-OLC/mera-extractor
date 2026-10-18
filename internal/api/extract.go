@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 
 	"mera-extractor/internal/gitops"
@@ -252,12 +254,50 @@ func respondExtractError(w http.ResponseWriter, r *http.Request, req extractRequ
 	respondError(w, r, status, fmt.Errorf("requestId=%s: %w", req.RequestID, err))
 }
 
+// annotateExtractRequest tags the access log with who asked for what. It also
+// logs one line straight away: /extract can run for minutes, and the "←" line
+// only appears at the end, so without this a hung extraction would show an
+// rid and a route but not which repo or commits it was stuck on.
+func annotateExtractRequest(r *http.Request, req extractRequest) {
+	kv := []any{"requestId", req.RequestID, "repo", redactURL(req.RepoURL),
+		"user", req.Username, "base", shortSha(req.BaseSha), "head", shortSha(req.HeadSha)}
+	if len(req.Units) > 0 || len(req.Modules) > 0 {
+		kv = append(kv, "reqUnits", len(req.Units), "reqModules", len(req.Modules))
+	}
+	annotate(r, kv...)
+	log.Printf("http rid=%s extract started requestId=%s repo=%s base=%s head=%s",
+		requestRID(r), logValue(req.RequestID), logValue(redactURL(req.RepoURL)),
+		logValue(shortSha(req.BaseSha)), logValue(shortSha(req.HeadSha)))
+}
+
+// changeKindCounts renders e.g. "Added:2,Modified:5" in a stable order.
+func changeKindCounts(units []changeUnit) string {
+	counts := map[string]int{}
+	for _, u := range units {
+		counts[u.ChangeKind]++
+	}
+	kinds := make([]string, 0, len(counts))
+	for k := range counts {
+		kinds = append(kinds, k)
+	}
+	sort.Strings(kinds)
+	parts := make([]string, 0, len(kinds))
+	for _, k := range kinds {
+		parts = append(parts, fmt.Sprintf("%s:%d", k, counts[k]))
+	}
+	if len(parts) == 0 {
+		return "0"
+	}
+	return strings.Join(parts, ",")
+}
+
 func (s *Server) handleExtract(w http.ResponseWriter, r *http.Request) {
 	var req extractRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondError(w, r, http.StatusBadRequest, err)
 		return
 	}
+	annotateExtractRequest(r, req)
 	if req.BaseSha == "" || req.HeadSha == "" {
 		respondExtractError(w, r, req, http.StatusBadRequest, errors.New("baseSha and headSha are both required"))
 		return
@@ -406,6 +446,9 @@ func (s *Server) extractDiff(ctx context.Context, w http.ResponseWriter, r *http
 		warnings = append(warnings, "could not read mxcli version: "+err.Error())
 	}
 
+	annotate(r, "path", "diff", "mendix", headInfo.MendixVersion,
+		"unitDiffs", len(diff.UnitDifferences), "changeUnits", changeKindCounts(units),
+		"textDiffs", len(textDiffs), "warnings", len(warnings))
 	writeJSON(w, http.StatusOK, extractResponse{
 		RequestID:     req.RequestID,
 		MendixVersion: headInfo.MendixVersion,
@@ -443,6 +486,7 @@ func (s *Server) extractNaive(ctx context.Context, w http.ResponseWriter, r *htt
 	}
 
 	unitResults, warnings := describeAll(ctx, d, mprPath, units)
+	annotate(r, "path", "naive", "units", len(unitResults), "warnings", len(warnings))
 
 	writeJSON(w, http.StatusOK, legacyExtractResponse{
 		MprPath:  mprPath,

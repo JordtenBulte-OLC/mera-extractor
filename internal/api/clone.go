@@ -21,6 +21,8 @@ func (s *Server) handleClone(w http.ResponseWriter, r *http.Request) {
 		respondError(w, r, http.StatusBadRequest, err)
 		return
 	}
+	// Username is logged as the git identity behind the call; Pat never is.
+	annotate(r, "repo", redactURL(req.RepoURL), "user", req.Username, "sha", shortSha(req.Sha))
 
 	result, err := gitops.Clone(r.Context(), s.WorkRoot, gitops.CloneRequest{
 		RepoURL: req.RepoURL, Username: req.Username, Pat: req.Pat, Sha: req.Sha,

@@ -17,8 +17,10 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 // through, which is what makes the two rules below hold everywhere rather
 // than depending on each call site remembering them:
 //
-//  1. The real error is always logged server-side, unconditionally. Nothing
-//     else in this package logs — see MERA-session-status.md for the
+//  1. The real error is always logged server-side, unconditionally, tagged
+//     with the request's rid so it pairs up with the access-log lines in
+//     accesslog.go (which log metadata only, never the error text) — see
+//     MERA-session-status.md for the
 //     request that surfaced this: a 500 that produced no server-side trace
 //     at all, because nothing in the request path called log.* anywhere.
 //  2. For 5xx, the caller gets a generic message instead of err.Error().
@@ -29,7 +31,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 //     failure already sanitized where it could carry a credential (see
 //     gitops.redact) — that detail is meant to be actionable, not hidden.
 func respondError(w http.ResponseWriter, r *http.Request, status int, err error) {
-	log.Printf("%s %s: %d: %v", r.Method, r.URL.Path, status, err)
+	log.Printf("http rid=%s %s %s: %d: %v", requestRID(r), r.Method, r.URL.Path, status, err)
 
 	msg := err.Error()
 	if status >= http.StatusInternalServerError {
