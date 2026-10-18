@@ -15,7 +15,9 @@
 # output for anything that looks off on a different version, and validate
 # with a real mx diff (not just --help) before trusting it in production.
 
+11.15.0
 11.13.0
+11.12.6
 11.12.1
 11.12.0
 11.11.0
