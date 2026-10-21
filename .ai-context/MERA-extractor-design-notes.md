@@ -166,7 +166,7 @@ Each worktree is created `--no-checkout`, given a non-cone sparse set of `*.mpr`
 
 **Why it was needed.** A commit with several marketplace-module updates (3,911 files at base) timed out: the full base checkout alone pulled ~100 MB at ~200 KB/s from Team Server and did not finish inside the 300s `cloneBothTimeout`. The model-only set also differs from the sparse list in the architecture doc's §4 (which adds `javasource/**`, `theme/**`, `deployment/**`): those folders would be downloaded in full, twice, to serve a reader that never looks at the worktree.
 
-Confirmed on git 2.39.5 (the runtime image's version — the host's 2.53 is not what ships): sparse config is per-worktree (git turns on `extensions.worktreeConfig` itself, the bare repo is unaffected), each side's checkout is **one** batched lazy fetch, and the prefetch is one more. **UNVERIFIED on a real app:** whether `mx`/`mxcli` read anything from the project directory besides the model. If they do (`widgets/*.mpk` is the likeliest), `PrepareMpr`/`Diff`/`Describe` fail loudly and the fix is one entry in `modelPaths`.
+Confirmed on git 2.39.5 (the runtime image's version — the host's 2.53 is not what ships): sparse config is per-worktree (git turns on `extensions.worktreeConfig` itself, the bare repo is unaffected), each side's checkout is **one** batched lazy fetch, and the prefetch is one more. ~~**UNVERIFIED on a real app:** whether `mx`/`mxcli` read anything from the project directory besides the model.~~ **Verified 2026-10-22:** on the sparse worktrees, `show-version`, `diff`, `dump-mpr` and `mxcli describe` (microflow, page, image collection) all work against the real test app, and `TestExtract_SparseCheckoutNames_Integration` now asserts the worktree holds only the model and that names and MDL still come out. The sparse checkout was the first suspect for the nameless-units bug below (§6) and turned out innocent.
 
 ### Killing git on timeout
 
@@ -235,7 +235,9 @@ mx analyze-mpr →  Forms$Page   Forms$Snippet   Forms$Layout   Forms$BuildingBl
 
 `analyze-mpr` reports storage-level names, `dump-mpr` the current public metamodel names — Mendix evidently renamed the `Forms` namespace to `Pages` without changing what is on disk. Most types are spelled identically in both (`Microflows$Microflow`, `Images$ImageCollection`, `JavaActions$JavaAction`, `DomainModels$DomainModel`, `Projects$Folder`…).
 
-**Which one `mx diff` speaks is still unknown.** Both spellings are mapped, so the code is correct either way; one half is dead weight to be deleted once a page-touching commit settles it.
+~~**Which one `mx diff` speaks is still unknown.** Both spellings are mapped, so the code is correct either way~~
+
+> **Correction, logged 2026-10-22.** `mx diff` speaks the **storage** vocabulary: a real page change came back as `Forms$Page` (mx 11.13.0). And "the code is correct either way" was false. The mapping in `diffTypeToMxcli` was fine, but `resolveBothSides` also hands the diff's type strings to `dump-mpr --unit-type`, and **`dump-mpr` accepts only `Pages$X` and rejects the whole call (exit 2, `Invalid unit type(s) 'Forms$Page'`) on a single storage name**. So any commit touching a page lost the names, and therefore the MDL, of *every* unit in the diff, and that ran unnoticed for days: the warnings said exactly why, but MERA did not store them and the log only printed their count. Fixed in `mx.dumpMprUnitTypes` (`Forms$X` → `Pages$X`; all five confirmed accepted). `ResolveQualifiedNames` also drops any type `dump-mpr` still rejects and retries once, so one unknown type now costs only its own units' names. The `Pages$Page`/`Pages$Snippet` keys in `diffTypeToMxcli` are now the dead half; they are harmless and were left in place.
 
 > **An earlier revision of this section claimed the two tools share one vocabulary**, citing `Microflows$Microflow` and `Images$ImageCollection` appearing in both a real diff and a real dump. That evidence was worthless: those are exactly the types where the vocabularies agree, so they cannot discriminate. **Overlapping observations are not confirming observations** — the lesson generalises well beyond this map.
 
@@ -300,6 +302,8 @@ Manual §1.4's partial-success rule was applied case by case, not blanket-applie
 
 **Also a warning — and this one is debatable:** a wholesale `ResolveQualifiedNames` failure. Failing the request would throw away a successful clone and diff, and the units still carry type, changeKind and `structuralDelta`, which is a diminished but real review payload. If experience says a nameless response is worse than no response, it is a three-line change.
 
+> **Experience, 2026-10-22:** it stayed a warning, but now it can't go unnoticed. Every warning gets its own log line (`extract warning requestId=…`). When *no* unit could be named, an `ERROR extract: none of N change units could be named` line carries the resolve warnings, mx's stderr included. A quiet degrade is right only if someone can see it happened.
+
 **Fatal:** `mx diff` failing with the migration signature (`422`); no binary matching the detected version (`422`, per manual §1.3's fail-loudly-never-substitute rule); a clone failure (`502`); no binaries at all under `MxRoot` (`500` — our misconfiguration, not the caller's). `ErrUnsupportedMendixVersion` from diff is `422` because the caller chose the commits; every other diff failure is `500`.
 
 ### The escape hatch
@@ -330,7 +334,7 @@ Recording these so they read as decisions rather than oversights:
 
 4. **`CloneBoth`'s 300s timeout is a guess** — 2.5× `Clone`'s budget for roughly 2× the work, plus slack. A package-level `var` so a test can shrink it. Replace with a measurement once real `/extract` calls run against apps larger than the test app's 1,037 units. Real numbers so far: `/extract` 35s, `CloneBoth` alone 13s.
 
-5. **`Forms$` vs `Pages$` is unresolved** (§6). One integration run against a page-touching commit pair settles it; then delete the dead half of the map.
+5. ~~**`Forms$` vs `Pages$` is unresolved** (§6).~~ **Resolved 2026-10-22:** `mx diff` says `Forms$`, and the unresolved question was itself a live bug (see the correction in §6). Left over: the dead `Pages$` keys in `diffTypeToMxcli`, and DomainModel MDL, which mxcli v0.27 still has no describe for (`domainmodel` renders a diagram, not MDL).
 
 6. **`textDiffs` has never returned a non-empty result from the real repo.** Fully unit-tested against a local fixture, but the proving commit pair touched no `javasource`. Needs one run against a Java-touching pair.
 

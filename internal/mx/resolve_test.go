@@ -465,6 +465,136 @@ func TestResolveQualifiedNames_UnexpectedExitCode(t *testing.T) {
 	assertDumpMprExitError(t, err, 99, "unexpected exit code")
 }
 
+func TestDumpMprUnitTypes(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{"storage names become public names",
+			[]string{"Forms$Page", "Forms$Snippet", "Forms$Layout", "Forms$BuildingBlock", "Forms$PageTemplate"},
+			[]string{"Pages$Page", "Pages$Snippet", "Pages$Layout", "Pages$BuildingBlock", "Pages$PageTemplate"}},
+		{"both spellings collapse to one", []string{"Forms$Page", "Pages$Page"}, []string{"Pages$Page"}},
+		{"other namespaces untouched", []string{"Microflows$Microflow", "DomainModels$DomainModel"},
+			[]string{"Microflows$Microflow", "DomainModels$DomainModel"}},
+		{"empty input", nil, []string{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := dumpMprUnitTypes(tc.in)
+			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Errorf("dumpMprUnitTypes(%v) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDumpMprUnitTypes_DoesNotMutateCallerSlice(t *testing.T) {
+	in := []string{"Forms$Page"}
+	_ = dumpMprUnitTypes(in)
+	if in[0] != "Forms$Page" {
+		t.Errorf("caller's slice was mutated: %v", in)
+	}
+}
+
+func TestParseInvalidUnitTypes(t *testing.T) {
+	cases := []struct {
+		name, stderr string
+		want         []string
+	}{
+		// Both captured from real mx 11.13.0 dump-mpr runs, 2026-10-22.
+		{"one type, real", "Invalid unit type(s) 'Forms$Page'\n", []string{"Forms$Page"}},
+		{"two types, real", "Invalid unit type(s) 'Forms$Page, Nonsense$X'\n", []string{"Forms$Page", "Nonsense$X"}},
+		{"some other message", "bad unit type", nil},
+		{"unterminated quote", "Invalid unit type(s) 'Forms$Page", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseInvalidUnitTypes(tc.stderr)
+			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Errorf("parseInvalidUnitTypes(%q) = %v, want %v", tc.stderr, got, tc.want)
+			}
+		})
+	}
+}
+
+// The regression: a page change made mx diff report Forms$Page, dump-mpr
+// rejected it, and every unit in the response lost its name.
+func TestResolveQualifiedNames_TranslatesStorageTypeNames(t *testing.T) {
+	bin, seenTypesPath := writeDumpMprStubMx(t, sampleDumpJSON, "", 0)
+
+	_, err := ResolveQualifiedNames(context.Background(), bin, "app.mpr",
+		[]string{"Forms$Page", "Microflows$Microflow"}, map[string]bool{"id-1": true})
+	if err != nil {
+		t.Fatalf("ResolveQualifiedNames: %v", err)
+	}
+	seen, err := os.ReadFile(seenTypesPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(seen), "Forms$") || !strings.Contains(string(seen), "Pages$Page") {
+		t.Errorf("--unit-type = %q, want Forms$Page passed as Pages$Page", seen)
+	}
+}
+
+// writeRejectingDumpMprStubMx behaves like real dump-mpr when handed a type it
+// does not know: exit 2 with the real message, whatever else was asked for.
+// Every --unit-type value it is called with is appended to the returned file,
+// one line per call.
+func writeRejectingDumpMprStubMx(t *testing.T, dumpJSON, rejected string) (bin Binary, callsPath string) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mx")
+	callsPath = filepath.Join(dir, "calls.txt")
+
+	script := "#!/bin/sh\n"
+	script += fmt.Sprintf(`echo "$4" >> %q`+"\n", callsPath)
+	sh := strings.ReplaceAll(rejected, "$", `\$`) // "Odd$Type" is not a shell variable
+	script += fmt.Sprintf(`case "$4" in *%s*) echo "Invalid unit type(s) '%s'" >&2; exit 2;; esac`+"\n", sh, sh)
+	script += "cat > \"$6\" <<'MERA_DUMP_EOF'\n" + dumpJSON + "\nMERA_DUMP_EOF\n"
+	if err := os.WriteFile(path, []byte(script), 0755); err != nil {
+		t.Fatalf("writeRejectingDumpMprStubMx: %v", err)
+	}
+	return Binary{Version: "stub", Path: path}, callsPath
+}
+
+func TestResolveQualifiedNames_RetriesWithoutRejectedTypes(t *testing.T) {
+	bin, callsPath := writeRejectingDumpMprStubMx(t, sampleDumpJSON, "Odd$Type")
+
+	found, err := ResolveQualifiedNames(context.Background(), bin, "app.mpr",
+		[]string{"Microflows$Microflow", "Odd$Type"}, map[string]bool{"id-1": true})
+
+	if found["id-1"].QualifiedName != "MyModule.ACT_Thing" {
+		t.Errorf("the units dump-mpr could serve must still be named, got %+v", found)
+	}
+	var skipped *UnitTypesSkippedError
+	if !errors.As(err, &skipped) {
+		t.Fatalf("err = %v (%T), want *UnitTypesSkippedError", err, err)
+	}
+	if strings.Join(skipped.Types, ",") != "Odd$Type" {
+		t.Errorf("skipped = %v, want [Odd$Type]", skipped.Types)
+	}
+
+	data, _ := os.ReadFile(callsPath)
+	calls := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(calls) != 2 {
+		t.Fatalf("want one rejected call and one retry, got %q", calls)
+	}
+	if strings.Contains(calls[1], "Odd$Type") || !strings.Contains(calls[1], "Microflows$Microflow") {
+		t.Errorf("retry --unit-type = %q, want the rejected type dropped and the rest kept", calls[1])
+	}
+}
+
+func TestResolveQualifiedNames_UnparseableExit2IsNotRetried(t *testing.T) {
+	// "bad unit type" names nothing to drop, so a retry would fail identically.
+	bin, _ := writeDumpMprStubMx(t, "", "bad unit type", 2)
+	found, err := ResolveQualifiedNames(context.Background(), bin, "app.mpr", []string{"Microflows$Microflow"}, nil)
+	if found != nil {
+		t.Errorf("found = %v, want nil on a hard failure", found)
+	}
+	assertDumpMprExitError(t, err, 2, "invalid unit type(s)")
+}
+
 func assertDumpMprExitError(t *testing.T, err error, wantCode int, wantMeaning string) {
 	t.Helper()
 	if err == nil {

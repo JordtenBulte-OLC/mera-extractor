@@ -4,9 +4,11 @@ package mx
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -78,11 +80,54 @@ const maxContainerChainDepth = 32
 // JavaActions$JavaActionParameter, Microflows$MicroflowParameterObject,
 // Security$ModuleRole, at minimum) — those just resolve directly with no
 // synthesis needed, same as a top-level document.
+//
+// unitTypes may be spelled in either vocabulary — mx diff's storage-level
+// Forms$ names are translated (see dumpMprUnitTypes). If dump-mpr still
+// rejects some of them (exit 2), they are dropped and the call is retried
+// once without them: the result then comes back non-nil TOGETHER with an
+// *UnitTypesSkippedError naming what was dropped. Any other error comes back
+// with a nil map.
 func ResolveQualifiedNames(ctx context.Context, bin Binary, mprPath string, unitTypes []string, wantIDs map[string]bool) (map[string]ResolvedUnit, error) {
+	types := ensureModuleType(dumpMprUnitTypes(unitTypes))
+
+	found, err := dumpAndResolve(ctx, bin, mprPath, types, wantIDs)
+	var exitErr *DumpMprExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode != 2 {
+		return found, err
+	}
+
+	// ▶ Why retry rather than fail: the --unit-type filter only narrows the
+	// dump, resolution matches on $ID alone. One type string dump-mpr does
+	// not know must cost the units of that type their names, not every unit
+	// in the diff — which is what a single Forms$Page did until 2026-10-22.
+	invalid := parseInvalidUnitTypes(exitErr.Stderr)
+	kept := withoutTypes(types, invalid)
+	if len(invalid) == 0 || len(kept) == len(types) {
+		return nil, err // nothing recognisable to drop; retrying would fail the same way
+	}
+	found, err = dumpAndResolve(ctx, bin, mprPath, kept, wantIDs)
+	if err != nil {
+		return nil, err
+	}
+	return found, &UnitTypesSkippedError{Types: invalid}
+}
+
+// UnitTypesSkippedError reports a partial success: dump-mpr rejected Types,
+// the call was retried without them, and units of those types are simply
+// absent from the result.
+type UnitTypesSkippedError struct {
+	Types []string
+}
+
+func (e *UnitTypesSkippedError) Error() string {
+	return fmt.Sprintf("mx dump-mpr does not know unit type(s) %s; units of those types are unnamed",
+		strings.Join(e.Types, ", "))
+}
+
+func dumpAndResolve(ctx context.Context, bin Binary, mprPath string, types []string, wantIDs map[string]bool) (map[string]ResolvedUnit, error) {
 	outPath := filepath.Join(os.TempDir(), fmt.Sprintf("mera-dump-%d.json", time.Now().UnixNano()))
 	defer os.Remove(outPath)
 
-	types := ensureModuleType(unitTypes)
 	res, err := run(ctx, bin, 5*time.Minute, "dump-mpr", mprPath,
 		"--unit-type", strings.Join(types, ","),
 		"--output-file", outPath)
@@ -104,6 +149,66 @@ func ResolveQualifiedNames(ctx context.Context, bin Binary, mprPath string, unit
 	}
 
 	return resolveFromTree(raw, wantIDs), nil
+}
+
+// dumpMprUnitTypes translates mx diff's type strings into the ones dump-mpr
+// accepts, deduplicated, without mutating the caller's slice.
+//
+// ▶ Why: mx diff (like analyze-mpr) reports pages and their relatives under
+// the STORAGE-level namespace — Forms$Page, Forms$Snippet, Forms$Layout,
+// Forms$BuildingBlock, Forms$PageTemplate — while dump-mpr only accepts the
+// public metamodel name Pages$X and rejects the whole call (exit 2,
+// "Invalid unit type(s) 'Forms$Page'") on a single unknown one. All five
+// confirmed against mx 11.13.0 on 2026-10-22; Pages$X is accepted for each.
+// Only the filter is translated: the units come back under their dump-mpr
+// type, but resolution matches on $ID, so the caller never notices.
+func dumpMprUnitTypes(unitTypes []string) []string {
+	seen := make(map[string]bool, len(unitTypes))
+	out := make([]string, 0, len(unitTypes))
+	for _, t := range unitTypes {
+		if rest, ok := strings.CutPrefix(t, "Forms$"); ok {
+			t = "Pages$" + rest
+		}
+		if !seen[t] {
+			seen[t] = true
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// parseInvalidUnitTypes reads the rejected types out of dump-mpr's exit-2
+// message. Real captured output (mx 11.13.0, on stderr, one line):
+//
+//	Invalid unit type(s) 'Forms$Page, Nonsense$X'
+//
+// Returns nil when the message does not have that shape.
+func parseInvalidUnitTypes(stderr string) []string {
+	_, rest, ok := strings.Cut(stderr, "Invalid unit type(s) '")
+	if !ok {
+		return nil
+	}
+	list, _, ok := strings.Cut(rest, "'")
+	if !ok {
+		return nil
+	}
+	var out []string
+	for _, t := range strings.Split(list, ",") {
+		if t = strings.TrimSpace(t); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+func withoutTypes(types, drop []string) []string {
+	out := make([]string, 0, len(types))
+	for _, t := range types {
+		if !slices.Contains(drop, t) {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // ensureModuleType returns unitTypes with "Projects$Module" appended if not

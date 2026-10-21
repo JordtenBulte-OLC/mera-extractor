@@ -2,15 +2,21 @@
 package api
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
+
+	"mera-extractor/internal/gitops"
+	"mera-extractor/internal/mx"
 )
 
 // Guarded end-to-end test — real Team Server, real mx binaries, real mxcli.
@@ -352,4 +358,158 @@ func TestExtract_IntegrationEscapeHatch(t *testing.T) {
 		t.Errorf("mprPath %q is not in the head worktree", legacy.MprPath)
 	}
 	t.Logf("%d units enumerated from %s", len(legacy.Units), legacy.MprPath)
+}
+
+// Guarded like TestExtract_Integration, plus a commit pair that changes at
+// least one microflow AND one page:
+//
+//	export MERA_IT_NAMES_BASE_SHA=13677c2...   # on the b12ab91d test repo:
+//	export MERA_IT_NAMES_HEAD_SHA=c340a97...   # 1 page, 2 microflows, 1 image
+//
+// The regression it pins (2026-10-22): mx diff reports a page as Forms$Page,
+// dump-mpr only accepts Pages$Page and rejected the whole call, so every unit
+// of every type came back nameless and MDL-less. It runs on the real sparse,
+// model-only worktrees, so it would also catch mx or mxcli needing a file the
+// sparse set leaves out — the first suspect for that symptom.
+func TestExtract_SparseCheckoutNames_Integration(t *testing.T) {
+	repoURL := os.Getenv("MERA_IT_REPO")
+	pat := os.Getenv("MERA_PAT")
+	baseSha := os.Getenv("MERA_IT_NAMES_BASE_SHA")
+	headSha := os.Getenv("MERA_IT_NAMES_HEAD_SHA")
+	if repoURL == "" || pat == "" || baseSha == "" || headSha == "" || os.Getenv("MERA_MX_ROOT") == "" {
+		t.Skip("set MERA_IT_REPO, MERA_PAT, MERA_IT_NAMES_BASE_SHA, MERA_IT_NAMES_HEAD_SHA and MERA_MX_ROOT to run")
+	}
+	mxRoot := resolveMxRoot(t)
+	srv := NewServer(t.TempDir(), mxRoot)
+
+	// Real implementations throughout; the wrappers only record what the
+	// handler used and keep the worktrees alive past the response, so the
+	// DomainModel check below reads the very same sparse checkout.
+	real := Deps{}.withDefaults()
+	var clone gitops.CloneBothResult
+	var headMpr string
+	srv.Deps.CloneBoth = func(ctx context.Context, workRoot string, req gitops.CloneBothRequest) (gitops.CloneBothResult, error) {
+		res, err := real.CloneBoth(ctx, workRoot, req)
+		clone = res
+		return res, err
+	}
+	srv.Deps.PrepareMpr = func(ctx context.Context, bin mx.Binary, dir string) (string, mx.AnalyzeResult, error) {
+		p, info, err := real.PrepareMpr(ctx, bin, dir)
+		if dir == clone.HeadDir {
+			headMpr = p
+		}
+		return p, info, err
+	}
+	srv.Deps.Cleanup = func(string) error { return nil }
+	t.Cleanup(func() { real.Cleanup(clone.WorkDir) })
+
+	body, _ := json.Marshal(extractRequest{
+		RequestID: "integration-names", RepoURL: repoURL, Username: "pat", Pat: pat,
+		BaseSha: baseSha, HeadSha: headSha,
+	})
+	w := httptest.NewRecorder()
+	srv.handleExtract(w, httptest.NewRequest(http.MethodPost, "/extract", strings.NewReader(string(body))))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d\n%s", w.Code, w.Body.String())
+	}
+	var resp extractResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	for _, warn := range resp.Warnings {
+		t.Logf("WARNING: %s", warn)
+		if strings.Contains(warn, "could not resolve") {
+			t.Errorf("name resolution failed: %s", warn)
+		}
+	}
+
+	// --- the worktree really is sparse -------------------------------------
+	entries, err := os.ReadDir(clone.HeadDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if n := e.Name(); n != ".git" && n != "mprcontents" && !strings.HasSuffix(n, ".mpr") {
+			t.Errorf("head worktree contains %q — not the model-only sparse set this test is meant to cover", n)
+		}
+	}
+
+	// --- Microflow and Page: name, module and MDL per side ------------------
+	seen := map[string]int{}
+	for _, u := range resp.ChangeUnits {
+		kind := map[string]string{
+			"Microflows$Microflow": "microflow", "Forms$Page": "page", "Pages$Page": "page",
+		}[u.UnitType]
+		if kind == "" {
+			continue
+		}
+		seen[kind]++
+		t.Logf("%-9s %-8s %s before=%dB after=%dB", kind, u.ChangeKind, u.QualifiedName, len(u.BeforeMdl), len(u.AfterMdl))
+		if u.QualifiedName == "" || u.Module == "" {
+			t.Errorf("%s %s unit has no name/module: %+v", u.ChangeKind, u.UnitType, u)
+		}
+		if u.ChangeKind != "Added" && u.BeforeMdl == "" {
+			t.Errorf("%s %s has no beforeMdl", u.ChangeKind, u.QualifiedName)
+		}
+		if u.ChangeKind != "Deleted" && u.AfterMdl == "" {
+			t.Errorf("%s %s has no afterMdl", u.ChangeKind, u.QualifiedName)
+		}
+	}
+	if seen["microflow"] == 0 || seen["page"] == 0 {
+		t.Fatalf("the commit pair must change a microflow and a page to cover the regression; saw %v", seen)
+	}
+
+	// --- DomainModel: name, on the same sparse head --------------------------
+	// None changes in this pair, so the ids come straight from dump-mpr. The
+	// type list leads with Forms$Page on purpose: before the fix, that alone
+	// failed the call. MDL is deliberately not asserted — DomainModel is in
+	// knownNotDescribable (mxcli's `domainmodel` is a diagram, not MDL).
+	bin, err := mx.Resolve(mxRoot, resp.MendixVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dmIDs := dumpUnitIDs(t, bin, headMpr, "DomainModels$DomainModel")
+	if len(dmIDs) == 0 {
+		t.Fatal("dump-mpr found no domain models in the head worktree")
+	}
+	got, err := mx.ResolveQualifiedNames(context.Background(), bin, headMpr,
+		[]string{"Forms$Page", "DomainModels$DomainModel"}, dmIDs)
+	if err != nil {
+		t.Fatalf("ResolveQualifiedNames: %v", err)
+	}
+	for id := range dmIDs {
+		u, ok := got[id]
+		if !ok || u.Module == "" || u.QualifiedName != u.Module+".domainModel" {
+			t.Errorf("domain model %s resolved to %+v, want <Module>.domainModel", id, u)
+		}
+	}
+	t.Logf("%d domain models named on the sparse checkout", len(got))
+}
+
+// dumpUnitIDs runs dump-mpr directly and returns the $ID of every top-level
+// unit of unitType. Test-only discovery: production code never needs ids it
+// was not handed by mx diff.
+func dumpUnitIDs(t *testing.T, bin mx.Binary, mprPath, unitType string) map[string]bool {
+	t.Helper()
+	out := filepath.Join(t.TempDir(), "dump.json")
+	if b, err := exec.Command(bin.Path, "dump-mpr", mprPath, "--unit-type", unitType, "--output-file", out).CombinedOutput(); err != nil {
+		t.Fatalf("dump-mpr: %v\n%s", err, b)
+	}
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dump struct {
+		Units []struct {
+			ID string `json:"$ID"`
+		} `json:"units"`
+	}
+	if err := json.Unmarshal(bytes.TrimPrefix(data, []byte{0xEF, 0xBB, 0xBF}), &dump); err != nil {
+		t.Fatalf("parse dump: %v", err)
+	}
+	ids := map[string]bool{}
+	for _, u := range dump.Units {
+		ids[u.ID] = true
+	}
+	return ids
 }

@@ -795,6 +795,68 @@ func TestExtract_ResolveFailureDegrades(t *testing.T) {
 	}
 }
 
+// dump-mpr rejected some unit types and was retried without them: the names it
+// did resolve must survive, not be thrown away with the warning.
+func TestExtract_PartialResolveKeepsTheNamesItGot(t *testing.T) {
+	h := newHarness(t)
+	h.setDiff(
+		mx.UnitDifference{Type: "Microflows$Microflow", ID: "mf", Change: "Modified"},
+		mx.UnitDifference{Type: "Odd$Type", ID: "odd", Change: "Modified"},
+	)
+	h.srv.Deps.ResolveQualifiedNames = func(ctx context.Context, bin mx.Binary, mprPath string, unitTypes []string, wantIDs map[string]bool) (map[string]mx.ResolvedUnit, error) {
+		return map[string]mx.ResolvedUnit{"mf": mf("mf", "Sales.ACT_Thing")},
+			&mx.UnitTypesSkippedError{Types: []string{"Odd$Type"}}
+	}
+	resp := decodeExtract(t, h.postDefault())
+
+	u := findUnit(t, resp, "Sales.ACT_Thing")
+	if u.BeforeMdl == "" || u.AfterMdl == "" {
+		t.Errorf("the named unit must still be described on both sides: %+v", u)
+	}
+	if !hasWarning(resp, "could not resolve head-side names") || !hasWarning(resp, "Odd$Type") {
+		t.Errorf("the skipped type must be reported, got %v", resp.Warnings)
+	}
+}
+
+func TestExtract_EveryWarningIsLogged(t *testing.T) {
+	buf := captureLog(t)
+	h := newHarness(t)
+	h.setDiff(mx.UnitDifference{Type: "Microflows$Microflow", ID: "x", Change: "Modified"})
+	h.setNames(nil, map[string]mx.ResolvedUnit{"x": mf("x", "Sales.ACT_X")})
+	h.srv.Deps.MxcliVersion = func(ctx context.Context) (string, error) { return "", errors.New("no mxcli") }
+
+	decodeExtract(t, h.postDefault())
+
+	if !strings.Contains(buf.String(), "extract warning requestId=req-1: could not read mxcli version: no mxcli") {
+		t.Errorf("warning not logged:\n%s", buf.String())
+	}
+	if strings.Contains(buf.String(), "ERROR") {
+		t.Errorf("a named unit must not trigger the nothing-named error:\n%s", buf.String())
+	}
+}
+
+func TestExtract_NothingNamedIsLoggedAsErrorWithMxStderr(t *testing.T) {
+	buf := captureLog(t)
+	h := newHarness(t)
+	h.setDiff(
+		mx.UnitDifference{Type: "Microflows$Microflow", ID: "a", Change: "Modified"},
+		mx.UnitDifference{Type: "Forms$Page", ID: "b", Change: "Modified"},
+	)
+	h.srv.Deps.ResolveQualifiedNames = func(ctx context.Context, bin mx.Binary, mprPath string, unitTypes []string, wantIDs map[string]bool) (map[string]mx.ResolvedUnit, error) {
+		return nil, &mx.DumpMprExitError{ExitCode: 2, Stderr: "Invalid unit type(s) 'Forms$Page'\n"}
+	}
+	w := h.postDefault()
+	decodeExtract(t, w) // still 200: a nameless payload degrades, it does not fail
+
+	out := buf.String()
+	if !strings.Contains(out, "ERROR extract: none of 2 change units could be named requestId=req-1") {
+		t.Errorf("missing error line:\n%s", out)
+	}
+	if !strings.Contains(out, "Invalid unit type(s) 'Forms$Page'") {
+		t.Errorf("error line must carry mx's own stderr:\n%s", out)
+	}
+}
+
 func TestExtract_UnrecognisedTypeWarnsOncePerTypeAndSkipsDescribe(t *testing.T) {
 	h := newHarness(t)
 	h.setDiff(

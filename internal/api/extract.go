@@ -150,6 +150,11 @@ type unitResult struct {
 // exactly the types where the vocabularies agree, so they cannot discriminate.
 // Until a real diff reports a page, BOTH spellings are mapped.
 //
+// Correction, logged 2026-10-22: a real diff has now reported a page, as
+// Forms$Page — mx diff speaks the storage vocabulary. That also broke name
+// resolution for every unit until dump-mpr's --unit-type filter learned to
+// translate (mx.dumpMprUnitTypes); see the design notes §6.
+//
 // Completeness is not required for correctness. A type that is neither here nor
 // in knownNotDescribable produces exactly one warning naming the string mx
 // actually emitted, so a real run tells you precisely which key to add rather
@@ -163,8 +168,9 @@ var diffTypeToMxcli = map[string]string{
 	"Pages$Snippet":        "snippet",
 	"Constants$Constant":   "constant",
 	// The SAME units, spelled the way `mx analyze-mpr` reports them. See the
-	// "two vocabularies" note above the map — which spelling mx diff uses is
-	// not yet known, so both are mapped. A key that never matches costs nothing.
+	// "two vocabularies" note above the map. Correction, logged 2026-10-22:
+	// this is the spelling mx diff uses — a real page change arrived as
+	// Forms$Page — so these are the live keys and the Pages$ ones above are dead.
 	"Forms$Page":                   "page",
 	"Forms$Snippet":                "snippet",
 	"Forms$Layout":                 "layout",
@@ -268,6 +274,38 @@ func annotateExtractRequest(r *http.Request, req extractRequest) {
 	log.Printf("http rid=%s extract started requestId=%s repo=%s base=%s head=%s",
 		requestRID(r), logValue(req.RequestID), logValue(redactURL(req.RepoURL)),
 		logValue(shortSha(req.BaseSha)), logValue(shortSha(req.HeadSha)))
+}
+
+// logWarnings writes one line per response warning. The access log only
+// carries the count, and the caller may not keep the response body — which is
+// how a week of nameless extractions went unexplained (2026-10-22): the cause
+// was in the warnings all along, and nobody stored them.
+func logWarnings(r *http.Request, req extractRequest, warnings []string) {
+	for _, w := range warnings {
+		log.Printf("http rid=%s extract warning requestId=%s: %s",
+			requestRID(r), logValue(req.RequestID), strings.TrimSpace(w))
+	}
+}
+
+// logIfNothingNamed is the loud half of a quiet degrade. A unit without a name
+// still ships (type, changeKind, structuralDelta), but when NO unit has one the
+// review payload is close to useless, and that must not hide among warnings.
+// The resolve warnings carry mx's own stderr, so the line says why.
+func logIfNothingNamed(r *http.Request, req extractRequest, plans []changePlan, resolveWarnings []string) {
+	if len(plans) == 0 {
+		return
+	}
+	for _, p := range plans {
+		if p.unit.QualifiedName != "" {
+			return
+		}
+	}
+	cause := "dump-mpr succeeded but none of the diff's unit ids were in its output"
+	if len(resolveWarnings) > 0 {
+		cause = strings.Join(resolveWarnings, " | ")
+	}
+	log.Printf("http rid=%s ERROR extract: none of %d change units could be named requestId=%s: %s",
+		requestRID(r), len(plans), logValue(req.RequestID), strings.TrimSpace(cause))
 }
 
 // changeKindCounts renders e.g. "Added:2,Modified:5" in a stable order.
@@ -425,6 +463,7 @@ func (s *Server) extractDiff(ctx context.Context, w http.ResponseWriter, r *http
 
 	plans, planWarnings := planChangeUnits(diff.UnitDifferences, baseNames, headNames)
 	warnings = append(warnings, planWarnings...)
+	logIfNothingNamed(r, req, plans, resolveWarnings)
 
 	units, describeWarnings := describeChangeUnits(ctx, d, baseMpr, headMpr, plans)
 	warnings = append(warnings, describeWarnings...)
@@ -449,6 +488,7 @@ func (s *Server) extractDiff(ctx context.Context, w http.ResponseWriter, r *http
 	annotate(r, "path", "diff", "mendix", headInfo.MendixVersion,
 		"unitDiffs", len(diff.UnitDifferences), "changeUnits", changeKindCounts(units),
 		"textDiffs", len(textDiffs), "warnings", len(warnings))
+	logWarnings(r, req, warnings)
 	writeJSON(w, http.StatusOK, extractResponse{
 		RequestID:     req.RequestID,
 		MendixVersion: headInfo.MendixVersion,
@@ -487,6 +527,7 @@ func (s *Server) extractNaive(ctx context.Context, w http.ResponseWriter, r *htt
 
 	unitResults, warnings := describeAll(ctx, d, mprPath, units)
 	annotate(r, "path", "naive", "units", len(unitResults), "warnings", len(warnings))
+	logWarnings(r, req, warnings)
 
 	writeJSON(w, http.StatusOK, legacyExtractResponse{
 		MprPath:  mprPath,
@@ -581,11 +622,15 @@ func resolveBothSides(ctx context.Context, d Deps, bin mx.Binary, baseMpr, headM
 	base = map[string]mx.ResolvedUnit{}
 	head = map[string]mx.ResolvedUnit{}
 
+	// A non-nil map is kept even alongside an error: ResolveQualifiedNames
+	// returns both when it had to skip unit types dump-mpr rejected, and the
+	// names it did resolve are still good.
 	if len(wantBase) > 0 {
 		got, err := d.ResolveQualifiedNames(ctx, bin, baseMpr, types, wantBase)
 		if err != nil {
 			warnings = append(warnings, "could not resolve base-side names: "+err.Error())
-		} else {
+		}
+		if got != nil {
 			base = got
 		}
 	}
@@ -593,7 +638,8 @@ func resolveBothSides(ctx context.Context, d Deps, bin mx.Binary, baseMpr, headM
 		got, err := d.ResolveQualifiedNames(ctx, bin, headMpr, types, wantHead)
 		if err != nil {
 			warnings = append(warnings, "could not resolve head-side names: "+err.Error())
-		} else {
+		}
+		if got != nil {
 			head = got
 		}
 	}
