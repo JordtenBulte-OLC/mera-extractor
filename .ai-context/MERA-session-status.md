@@ -2,7 +2,7 @@
 
 **Read this first in a new session.** Living status doc: where we are, what's next, and the environment facts you need to run anything. The other docs are reference material this points into.
 
-Last substantive update: 2026-08-23 — **Stage 8 complete and verified end to end against the real Team Server repo.**
+Last substantive update: 2026-10-22 — **nameless-change-units bug fixed and verified on both repos** (see §3, first entry). Before that, 2026-08-23: Stage 8 complete and verified end to end against the real Team Server repo.
 
 ## The doc map
 
@@ -36,8 +36,8 @@ Proven on 2026-08-23 against the real repo: **2 change units instead of 1,037**,
 **The Mendix side is the whole remaining project.** Manual Parts 2 onward. Two things worth doing first:
 
 1. **Manual §M2 — the Anthropic SDK smoke test.** A twenty-minute job that de-risks the entire Java side. Nothing depends on it, so it can happen in parallel with anything.
-2. **Three cheap Stage 8 follow-ups**, each one integration run (see `MERA-stage8.md` §6):
-   - A commit pair touching a **page** settles whether `mx diff` speaks `Forms$Page` or `Pages$Page`; then delete the dead half of `diffTypeToMxcli`.
+2. **Cheap Stage 8 follow-ups**, each one integration run (see `MERA-stage8.md` §6):
+   - ~~A commit pair touching a **page** settles whether `mx diff` speaks `Forms$Page` or `Pages$Page`~~ — **settled 2026-10-22: `Forms$Page`.** Remaining: delete the now-dead `Pages$Page`/`Pages$Snippet`/`Pages$Layout`/`Pages$BuildingBlock` keys from `diffTypeToMxcli` (check `TestTypeTablesAreCoherent` still passes).
    - A commit pair touching **javasource** proves `textDiffs` end to end — it has never returned a non-empty result from the real repo.
    - `mxcli.Version` should return `v0.19.0`, not `"mxcli version v0.19.0 (2026-08-21T13:13:26Z)\n"`.
 
@@ -45,7 +45,17 @@ Proven on 2026-08-23 against the real repo: **2 change units instead of 1,037**,
 
 ## 3. Open items
 
-**2026-10-18 — `/extract` timeout incident, fixed, awaiting a real re-run.** A commit pair with several marketplace-module updates hit `cloneBothTimeout` (300s): the full base checkout pulled ~100 MB from Team Server at ~200 KB/s. Then the handler hung past its deadline, because the killed `git worktree add`'s descendants kept downloading and held the output pipe. Three fixes: (1) git runs in its own process group, killed whole on timeout, with `WaitDelay` as a backstop; compose gets `init: true`. (2) Worktrees are sparse, model only (`*.mpr`, `mprcontents/`), with a credentialed prefetch of exactly the blobs `TextDiffs` needs; `MERA_CLONE_TIMEOUT` makes the deadline configurable. (3) The healthcheck called `wget`, which the image doesn't have, so every container had always shown "unhealthy" — **correction, logged:** compose presented that check as working; it never was. Now it uses `curl`. Details in design notes. **Still to verify:** re-run that same commit pair from Mendix and confirm `mx`/`mxcli` need nothing beyond the model files.
+**2026-10-22 — `/extract` returned every change unit without name or MDL. Fixed (commit `dfae937`), verified.** Symptom: HTTP 200 with correct counts, but every unit had empty `qualifiedName`/`module` and no MDL. The prime suspect was the sparse checkout from `5aa371b`, and it turned out **innocent**. The real cause: for a page change, `mx diff` reports `Forms$Page` (storage name), and `resolveBothSides` passes the diff types to `dump-mpr --unit-type`. `dump-mpr` accepts only `Pages$Page`, so it rejected the *whole* call (exit 2), and every unit in the diff lost its name, not just the page. The cause was in the response warnings all along, but MERA didn't store them and the log only printed the count. Fix: `mx.dumpMprUnitTypes` rewrites `Forms$X` → `Pages$X`; a type `dump-mpr` still rejects is dropped and the call retried, so it costs only its own units. Every warning is now logged per line, and an `ERROR` line fires when no unit could be named. Verified: test-repo pair `13677c2 → c340a97` went from 6 warnings to 0; MERA app pair `f5b147e → ef25be9` went from 8 warnings and 17.7 KB to 0 warnings and 73 KB. New guarded test `TestExtract_SparseCheckoutNames_Integration` (needs `MERA_IT_NAMES_BASE_SHA`/`MERA_IT_NAMES_HEAD_SHA`, see §4). Details: design notes §6 correction.
+
+**Open items left by that session — pick up here:**
+
+1. **DomainModel MDL — needs a decision first.** `DomainModels$DomainModel` is in `knownNotDescribable`, with the reason "entity and association changes are reported as their own units". That is probably wrong: `mx diff` reports per storage unit, so an entity edit most likely arrives as one `DomainModels$DomainModel` Modified with no MDL at all. mxcli v0.27 has no MDL describe for a whole domain model (`domainmodel` renders an SVG/ELK diagram only). Option: describe each entity and association of the module (`entity`/`association` types exist) and concatenate them. That conflicts with the documented decision, so decide before building. **First step: capture a real diff of a commit that edits an entity**, to confirm how `mx diff` reports it.
+2. **Flaky test:** `internal/workspace` `TestTrack_StopIsIdempotent` fails about 1 in 5 runs (`go test -count=20 -run TestTrack_StopIsIdempotent ./internal/workspace/` reproduces it): `TempDir RemoveAll cleanup: … clone-both-idem: directory not empty`. It looks like a heartbeat write racing the test's temp-dir cleanup after `stop()`. Unrelated to the fix above.
+3. **Dead `Pages$` keys in `diffTypeToMxcli`** — see §2.
+4. **Host mxcli is v0.19.0, container v0.27.0.** The integration tests run the host one, so they don't test what ships. Update `~/bin/mxcli`, or note the gap.
+5. **`.env` has no `MERA_IT_NAMES_*` yet**, so the new integration test skips unless they're set by hand (values in §4).
+
+**2026-10-18 — `/extract` timeout incident, fixed. Re-run verified 2026-10-21:** the marketplace pair `fb7a31b → 9062fac` completed in 44s, and `mx`/`mxcli` need nothing beyond the model files (see the 2026-10-22 entry above). A commit pair with several marketplace-module updates hit `cloneBothTimeout` (300s): the full base checkout pulled ~100 MB from Team Server at ~200 KB/s. Then the handler hung past its deadline, because the killed `git worktree add`'s descendants kept downloading and held the output pipe. Three fixes: (1) git runs in its own process group, killed whole on timeout, with `WaitDelay` as a backstop; compose gets `init: true`. (2) Worktrees are sparse, model only (`*.mpr`, `mprcontents/`), with a credentialed prefetch of exactly the blobs `TextDiffs` needs; `MERA_CLONE_TIMEOUT` makes the deadline configurable. (3) The healthcheck called `wget`, which the image doesn't have, so every container had always shown "unhealthy" — **correction, logged:** compose presented that check as working; it never was. Now it uses `curl`. Details in design notes. **Still to verify:** re-run that same commit pair from Mendix and confirm `mx`/`mxcli` need nothing beyond the model files.
 
 **Not blocking, but real:**
 
@@ -77,7 +87,9 @@ Empirical by nature; nothing here can be reasoned out from documentation. Doesn'
 - **Repo:** `https://git.api.mendix.com/b12ab91d-b0f7-42fa-b404-a2e86aa7f674.git`
 - **App shape:** **1,037 units** (was 608 earlier in the project — it has grown). 16 modules, several from the Marketplace. `ReviewManagement` ~90 units, `Administration` ~19 (the escape-hatch integration test uses it because it is small).
 - **Validated commit pairs:** one adding a single microflow; one combining an image add with the microflow add. The second is what proved Stage 8: it yields `Images$ImageCollection` (Modified) and `Microflows$Microflow` (Added), the latter resolving to `MxCliExtractor.ACT_Test_newMicroflow`.
-- **Neither validated pair touches a page or `javasource`** — which is exactly why the two follow-ups in §2 are still open.
+- **Page-touching pair (2026-10-22):** `13677c27691d5c3536c4acd8cea20487ba7bfce9` → `c340a979835ba403fad4ac5cfd56b09b921f2937` (both Mendix 11.13.0): `Forms$Page` `ApplicationAdministration.Home_Web` Modified, 2 microflows (Modified + Added), 1 image collection. Set as `MERA_IT_NAMES_BASE_SHA`/`MERA_IT_NAMES_HEAD_SHA` for `TestExtract_SparseCheckoutNames_Integration`. Earlier commits (`02bb305` and before) are Mendix 11.11, so a diff across that boundary fails (exit 4).
+- **No validated pair touches `javasource` or edits an entity** — the `textDiffs` follow-up in §2 and open item 1 in §3.
+- **MERA's own app** (`cf4fd06d-…`, Mendix 11.12.x) is a second real repo; the `.env` PAT cannot read it.
 - **Known-good commit:** `02bb30548e869706ee856a340e26354e5760e0d0`.
 - **Avoid:** any commit capturing a Studio Pro version upgrade *in progress*. Note this is NOT the same as an app that merely contains a `Projects$ProjectConversion` unit — this app does, and diffs fine. See `MERA-stage8.md` §3.
 - **Local clone for manual poking:** `~/mera/mera-repo`, with `git worktree add` checkouts at `/tmp/mera-base` and `/tmp/mera-head`.
