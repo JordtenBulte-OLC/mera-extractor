@@ -54,10 +54,10 @@ services:
       # MERA_WORKSPACE_TTL: "30m"
 
       # Deadline for /extract's clone step (fetch + both model checkouts +
-      # text-diff prefetch). Default 5m. Whatever calls /extract must wait
-      # LONGER than this, or the caller gives up first and never sees the
-      # extractor's own timeout error.
-      # MERA_CLONE_TIMEOUT: "5m"
+      # text-diff prefetch). Default 3m. Whatever calls /extract must wait
+      # LONGER than this plus the mx/mxcli stages, or the caller gives up
+      # first and never sees the extractor's own timeout error.
+      # MERA_CLONE_TIMEOUT: "3m"
 
     # NEVER put MERA_PAT here. The PAT arrives per request in the /extract
     # body and is written to a 0600 credential file that is deleted as soon

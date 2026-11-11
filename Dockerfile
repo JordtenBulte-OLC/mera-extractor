@@ -116,7 +116,7 @@ ENTRYPOINT ["/usr/local/bin/extractor"]
 
 ## Debug configuration
 
-FROM golang:1.27-bookworm AS delve
+FROM golang:1.27.3-bookworm AS delve
 RUN go install github.com/go-delve/delve/cmd/dlv@latest
 
 FROM build AS build-debug

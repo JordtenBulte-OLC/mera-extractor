@@ -472,7 +472,7 @@ func TestExtract_SparseCheckoutNames_Integration(t *testing.T) {
 	if len(dmIDs) == 0 {
 		t.Fatal("dump-mpr found no domain models in the head worktree")
 	}
-	got, err := mx.ResolveQualifiedNames(context.Background(), bin, headMpr,
+	got, err := mx.ResolveQualifiedNames(context.Background(), bin, headMpr, t.TempDir(),
 		[]string{"Forms$Page", "DomainModels$DomainModel"}, dmIDs)
 	if err != nil {
 		t.Fatalf("ResolveQualifiedNames: %v", err)

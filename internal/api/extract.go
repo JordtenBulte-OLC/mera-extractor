@@ -200,6 +200,13 @@ var diffTypeToMxcli = map[string]string{
 	// This was an UNVERIFIED guess and turned out right.
 	"Microflows$Nanoflow": "nanoflow",
 
+	// CONFIRMED type string from real `mx diff` output (CANValidator pair
+	// 9062fac → cc51724, 2026-10-30, where it surfaced as "unrecognised").
+	// The mxcli type is from v0.27.0's `describe --help` (the container's
+	// build; the host's v0.19.0 is older). A successful describe of a real
+	// published REST service has NOT been observed yet.
+	"Rest$PublishedRestService": "publishedrestservice",
+
 	// UNVERIFIED — the namespace is inferred from the confirmed naming pattern
 	// (<PluralNamespace>$<TypeName>), the mxcli type is from its own --help.
 	// A wrong key never matches and costs nothing; a wrong value degrades to a
@@ -342,8 +349,26 @@ func (s *Server) handleExtract(w http.ResponseWriter, r *http.Request) {
 	}
 
 	d := s.Deps.withDefaults()
-	ctx := r.Context()
 
+	if len(req.Units) > 0 || len(req.Modules) > 0 {
+		// The escape hatch is not collapsed: it is a manual debugging path,
+		// and its response shape differs from the diff path's.
+		stages := &stageTimer{}
+		s.extractNaive(r.Context(), w, r, d, req, stages)
+		annotate(r, "stages", stages.String())
+		return
+	}
+	s.extractDiffShared(w, r, d, req)
+}
+
+// cloneForExtract runs Step 1 (both worktrees) and returns a release func
+// that the caller must defer. It stops the heartbeat and removes the workdir.
+//
+// Heartbeat the workspace for as long as this request holds it, so a slow
+// extraction is not mistaken for an orphan and reaped mid-flight by the
+// janitor. Nil-safe when no workspace manager is wired, which is the case
+// in every handler test.
+func (s *Server) cloneForExtract(ctx context.Context, d Deps, req extractRequest) (gitops.CloneBothResult, func(), error) {
 	clone, err := d.CloneBoth(ctx, s.WorkRoot, gitops.CloneBothRequest{
 		RepoURL:  req.RepoURL,
 		Username: req.Username,
@@ -352,34 +377,77 @@ func (s *Server) handleExtract(w http.ResponseWriter, r *http.Request) {
 		HeadSha:  req.HeadSha,
 	})
 	if err != nil {
-		// A malformed (as opposed to missing) SHA also lands here as a 502,
-		// because gitops validates internally and exports no predicate to ask
-		// first. Worth revisiting if it turns out to confuse callers.
-		respondExtractError(w, r, req, http.StatusBadGateway, err)
-		return
+		return clone, nil, err
 	}
-	// Same reasoning as before Stage 8: the whole lifecycle fits in one
-	// request, so defer is correct and keeps the container's disk from
-	// filling up over many requests.
-	defer d.Cleanup(clone.WorkDir)
-
-	// Heartbeat the workspace for as long as this request holds it, so a slow
-	// extraction is not mistaken for an orphan and reaped mid-flight by the
-	// janitor. Registered after Cleanup so it runs first (defers are LIFO):
-	// the heartbeat goroutine stops before the dir is removed. Nil-safe when
-	// no workspace manager is wired — every handler test hits that path.
 	stopHeartbeat := s.Workspace.Track(clone.WorkDir)
-	defer stopHeartbeat()
+	// Same reasoning as before Stage 8: the whole lifecycle fits in one
+	// request, so cleaning up on the way out is correct and keeps the
+	// container's disk from filling up over many requests. The heartbeat
+	// stops first, so it never writes into a dir being removed.
+	release := func() {
+		stopHeartbeat()
+		d.Cleanup(clone.WorkDir)
+	}
+	return clone, release, nil
+}
 
-	if len(req.Units) > 0 || len(req.Modules) > 0 {
-		s.extractNaive(ctx, w, r, d, req, clone)
+// extractDiffShared runs the diff path through s.inflight, so identical
+// concurrent requests share one clone and one mx pipeline, then writes this
+// caller's own copy of the outcome.
+func (s *Server) extractDiffShared(w http.ResponseWriter, r *http.Request, d Deps, req extractRequest) {
+	rid := requestRID(r)
+	key := extractKey(req)
+	fl, joined := s.inflight.join(rid, key,
+		func(ctx context.Context, stages *stageTimer) extractOutcome {
+			// r is captured for its rid only, for the warning log lines.
+			// Annotations travel back in the outcome instead, because this
+			// run can outlive r: its own "←" line may already be written.
+			return s.extractDiff(ctx, r, d, req, stages)
+		})
+	if joined {
+		// Logged now, not when the run ends: that can be minutes away, and
+		// until then this line is the only sign the two requests share work.
+		log.Printf("http rid=%s extract joined in-flight run rid=%s (running: %s)",
+			rid, fl.leaderRID, fl.stages.String())
+		annotate(r, "joined", fl.leaderRID)
+	}
+	out, err := s.inflight.wait(r.Context(), key, fl)
+	if err != nil {
+		annotate(r, "stages", fl.stages.String())
+		respondExtractError(w, r, req, statusClientClosedRequest,
+			fmt.Errorf("caller went away before the extraction finished: %w", err))
 		return
 	}
-	s.extractDiff(ctx, w, r, d, req, clone)
+	annotate(r, out.fields...)
+	annotate(r, "stages", fl.stages.String())
+	if out.err != nil {
+		respondExtractError(w, r, req, out.status, out.err)
+		return
+	}
+	resp := out.resp // a copy; every caller gets its own requestId echoed back
+	resp.RequestID = req.RequestID
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // extractDiff is the Stage 8 default path: real change detection via mx diff.
-func (s *Server) extractDiff(ctx context.Context, w http.ResponseWriter, r *http.Request, d Deps, req extractRequest, clone gitops.CloneBothResult) {
+// It returns its outcome rather than writing it, so that every caller sharing
+// the run can write its own copy (see extractDiffShared).
+func (s *Server) extractDiff(ctx context.Context, r *http.Request, d Deps, req extractRequest, stages *stageTimer) extractOutcome {
+	defer stages.stop()
+	fail := func(status int, err error) extractOutcome {
+		return extractOutcome{status: status, err: err}
+	}
+
+	stages.start("clone")
+	clone, release, err := s.cloneForExtract(ctx, d, req)
+	if err != nil {
+		// A malformed (as opposed to missing) SHA also lands here as a 502,
+		// because gitops validates internally and exports no predicate to ask
+		// first. Worth revisiting if it turns out to confuse callers.
+		return fail(http.StatusBadGateway, err)
+	}
+	defer release()
+
 	var warnings []string
 
 	// A bootstrap binary, used only to read each side's Mendix version.
@@ -387,22 +455,20 @@ func (s *Server) extractDiff(ctx context.Context, w http.ResponseWriter, r *http
 	// "need the version to pick a binary, need a binary to read the version"
 	// cycle. A failure here is a server misconfiguration (no binaries
 	// installed under MxRoot), not a bad request.
+	stages.start("prepare")
 	boot, err := d.MxHighest(s.MxRoot)
 	if err != nil {
-		respondExtractError(w, r, req, http.StatusInternalServerError,
+		return fail(http.StatusInternalServerError,
 			fmt.Errorf("no usable mx binary under %s: %w", describeMxRoot(s.MxRoot), err))
-		return
 	}
 
 	headMpr, headInfo, err := d.PrepareMpr(ctx, boot, clone.HeadDir)
 	if err != nil {
-		respondExtractError(w, r, req, http.StatusInternalServerError, fmt.Errorf("prepare head .mpr: %w", err))
-		return
+		return fail(http.StatusInternalServerError, fmt.Errorf("prepare head .mpr: %w", err))
 	}
 	baseMpr, baseInfo, err := d.PrepareMpr(ctx, boot, clone.BaseDir)
 	if err != nil {
-		respondExtractError(w, r, req, http.StatusInternalServerError, fmt.Errorf("prepare base .mpr: %w", err))
-		return
+		return fail(http.StatusInternalServerError, fmt.Errorf("prepare base .mpr: %w", err))
 	}
 
 	// A Projects$ProjectConversion unit is NOT a reason to refuse the commit.
@@ -434,12 +500,12 @@ func (s *Server) extractDiff(ctx context.Context, w http.ResponseWriter, r *http
 	bin, err := d.MxResolve(s.MxRoot, headInfo.MendixVersion)
 	if err != nil {
 		// manual §1.3: fail loudly, never substitute a nearby version.
-		respondExtractError(w, r, req, http.StatusUnprocessableEntity,
+		return fail(http.StatusUnprocessableEntity,
 			fmt.Errorf("unsupportedMendixVersion %s under %s: %w",
 				headInfo.MendixVersion, describeMxRoot(s.MxRoot), err))
-		return
 	}
 
+	stages.start("diff")
 	diff, err := d.Diff(ctx, bin, baseMpr, headMpr, filepath.Join(clone.WorkDir, "diff.json"))
 	if err != nil {
 		// THIS is where a genuine mid-migration snapshot is caught: mx cannot
@@ -447,24 +513,24 @@ func (s *Server) extractDiff(ctx context.Context, w http.ResponseWriter, r *http
 		// it from analyze-mpr keeps the clean error message without rejecting
 		// commits that would have worked.
 		if mig := asVersionMigrationFailure(err, headInfo.MendixVersion); mig != nil {
-			respondExtractError(w, r, req, http.StatusUnprocessableEntity, mig)
-			return
+			return fail(http.StatusUnprocessableEntity, mig)
 		}
-		respondExtractError(w, r, req, diffErrorStatus(err), err)
-		return
+		return fail(diffErrorStatus(err), err)
 	}
 	if diff.ConflictsFound {
 		// Exit code 2. Per manual, the output is still usable.
 		warnings = append(warnings, "mx diff reported conflicts (exit 2); results are still usable")
 	}
 
-	baseNames, headNames, resolveWarnings := resolveBothSides(ctx, d, bin, baseMpr, headMpr, diff.UnitDifferences)
+	stages.start("resolve")
+	baseNames, headNames, resolveWarnings := resolveBothSides(ctx, d, bin, baseMpr, headMpr, clone.WorkDir, diff.UnitDifferences)
 	warnings = append(warnings, resolveWarnings...)
 
 	plans, planWarnings := planChangeUnits(diff.UnitDifferences, baseNames, headNames)
 	warnings = append(warnings, planWarnings...)
 	logIfNothingNamed(r, req, plans, resolveWarnings)
 
+	stages.start("describe")
 	units, describeWarnings := describeChangeUnits(ctx, d, baseMpr, headMpr, plans)
 	warnings = append(warnings, describeWarnings...)
 
@@ -473,6 +539,7 @@ func (s *Server) extractDiff(ctx context.Context, w http.ResponseWriter, r *http
 	// working tree and no credentials: both worktrees were checked out, so
 	// every blob either side is already local despite the blob:none filter.
 	// Cleanly separable from the mx path, so a failure here is a warning.
+	stages.start("textdiffs")
 	textDiffs, err := d.TextDiffs(ctx, clone.RepoDir, req.BaseSha, req.HeadSha, nil)
 	if err != nil {
 		warnings = append(warnings, "could not compute text diffs: "+err.Error())
@@ -480,35 +547,54 @@ func (s *Server) extractDiff(ctx context.Context, w http.ResponseWriter, r *http
 
 	// Provenance. A failure to read the mxcli version must not sink an
 	// otherwise good extraction.
+	stages.start("version")
 	mxcliVer, err := d.MxcliVersion(ctx)
 	if err != nil {
 		warnings = append(warnings, "could not read mxcli version: "+err.Error())
 	}
 
-	annotate(r, "path", "diff", "mendix", headInfo.MendixVersion,
-		"unitDiffs", len(diff.UnitDifferences), "changeUnits", changeKindCounts(units),
-		"textDiffs", len(textDiffs), "warnings", len(warnings))
+	stages.stop()
 	logWarnings(r, req, warnings)
-	writeJSON(w, http.StatusOK, extractResponse{
-		RequestID:     req.RequestID,
-		MendixVersion: headInfo.MendixVersion,
+	return extractOutcome{
+		fields: []any{"path", "diff", "mendix", headInfo.MendixVersion,
+			"unitDiffs", len(diff.UnitDifferences), "changeUnits", changeKindCounts(units),
+			"textDiffs", len(textDiffs), "warnings", len(warnings)},
+		resp: s.diffResponse(headInfo.MendixVersion, bin.Version, mxcliVer, units, textDiffs, warnings),
+	}
+}
+
+// diffResponse assembles the 200 body. RequestID is left for each caller to
+// set, since callers sharing a run (see inflight.go) each have their own.
+func (s *Server) diffResponse(mendixVersion, toolsetVersion, mxcliVer string, units []changeUnit, textDiffs []gitops.TextDiff, warnings []string) extractResponse {
+	return extractResponse{
+		MendixVersion: mendixVersion,
 		// StorageFormat is intentionally empty: mx.AnalyzeResult does not
 		// expose it, and inventing "MPRv2" would be a fabricated provenance
 		// field. Populate once analyze-mpr's raw output is confirmed to carry it.
 		StorageFormat:    "",
 		MxcliVersion:     mxcliVer,
-		MxToolsetVersion: mxToolsetVersionForResponse(headInfo.MendixVersion, bin.Version),
+		MxToolsetVersion: mxToolsetVersionForResponse(mendixVersion, toolsetVersion),
 		ChangeUnits:      units,
 		TextDiffs:        textDiffs,
 		Warnings:         warnings,
-	})
+	}
 }
 
 // extractNaive is the pre-Stage-8 path, reached only via the explicit
 // Units/Modules escape hatch. It runs against the HEAD worktree — the request
 // no longer carries a single `sha`, and head is the only defensible reading of
 // "the app" when two commits are in play.
-func (s *Server) extractNaive(ctx context.Context, w http.ResponseWriter, r *http.Request, d Deps, req extractRequest, clone gitops.CloneBothResult) {
+func (s *Server) extractNaive(ctx context.Context, w http.ResponseWriter, r *http.Request, d Deps, req extractRequest, stages *stageTimer) {
+	defer stages.stop()
+
+	stages.start("clone")
+	clone, release, err := s.cloneForExtract(ctx, d, req)
+	if err != nil {
+		respondExtractError(w, r, req, http.StatusBadGateway, err)
+		return
+	}
+	defer release()
+
 	mprPath, err := d.FindMpr(clone.HeadDir)
 	if err != nil {
 		respondExtractError(w, r, req, http.StatusBadGateway, err)
@@ -517,6 +603,7 @@ func (s *Server) extractNaive(ctx context.Context, w http.ResponseWriter, r *htt
 
 	units := req.Units
 	if len(units) == 0 {
+		stages.start("enumerate")
 		enumerated, err := enumerate(ctx, d, mprPath, req.Modules)
 		if err != nil {
 			respondExtractError(w, r, req, http.StatusBadGateway, err)
@@ -525,7 +612,9 @@ func (s *Server) extractNaive(ctx context.Context, w http.ResponseWriter, r *htt
 		units = enumerated
 	}
 
+	stages.start("describe")
 	unitResults, warnings := describeAll(ctx, d, mprPath, units)
+	stages.stop()
 	annotate(r, "path", "naive", "units", len(unitResults), "warnings", len(warnings))
 	logWarnings(r, req, warnings)
 
@@ -605,7 +694,9 @@ func diffErrorStatus(err error) int {
 // manual §1.4's partial-success rule: units still carry type, changeKind and
 // structuralDelta, which is a usable (if diminished) review payload, and
 // failing the request would throw away a successful clone and diff.
-func resolveBothSides(ctx context.Context, d Deps, bin mx.Binary, baseMpr, headMpr string, diffs []mx.UnitDifference) (base, head map[string]mx.ResolvedUnit, warnings []string) {
+//
+// workDir receives dump-mpr's exports, so they are cleaned up with the request.
+func resolveBothSides(ctx context.Context, d Deps, bin mx.Binary, baseMpr, headMpr, workDir string, diffs []mx.UnitDifference) (base, head map[string]mx.ResolvedUnit, warnings []string) {
 	types := distinctTypes(diffs)
 
 	wantBase := map[string]bool{}
@@ -626,7 +717,7 @@ func resolveBothSides(ctx context.Context, d Deps, bin mx.Binary, baseMpr, headM
 	// returns both when it had to skip unit types dump-mpr rejected, and the
 	// names it did resolve are still good.
 	if len(wantBase) > 0 {
-		got, err := d.ResolveQualifiedNames(ctx, bin, baseMpr, types, wantBase)
+		got, err := d.ResolveQualifiedNames(ctx, bin, baseMpr, workDir, types, wantBase)
 		if err != nil {
 			warnings = append(warnings, "could not resolve base-side names: "+err.Error())
 		}
@@ -635,7 +726,7 @@ func resolveBothSides(ctx context.Context, d Deps, bin mx.Binary, baseMpr, headM
 		}
 	}
 	if len(wantHead) > 0 {
-		got, err := d.ResolveQualifiedNames(ctx, bin, headMpr, types, wantHead)
+		got, err := d.ResolveQualifiedNames(ctx, bin, headMpr, workDir, types, wantHead)
 		if err != nil {
 			warnings = append(warnings, "could not resolve head-side names: "+err.Error())
 		}

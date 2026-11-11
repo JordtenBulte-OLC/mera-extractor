@@ -411,7 +411,7 @@ const sampleDumpJSON = `{"units":[{"$ID":"id-1","$Type":"Microflows$Microflow","
 func TestResolveQualifiedNames_Success(t *testing.T) {
 	bin, seenTypesPath := writeDumpMprStubMx(t, sampleDumpJSON, "", 0)
 
-	found, err := ResolveQualifiedNames(context.Background(), bin, "app.mpr", []string{"Microflows$Microflow"}, map[string]bool{"id-1": true})
+	found, err := ResolveQualifiedNames(context.Background(), bin, "app.mpr", t.TempDir(), []string{"Microflows$Microflow"}, map[string]bool{"id-1": true})
 	if err != nil {
 		t.Fatalf("ResolveQualifiedNames: unexpected error: %v", err)
 	}
@@ -437,31 +437,31 @@ func TestResolveQualifiedNames_Success(t *testing.T) {
 
 func TestResolveQualifiedNames_ExitCode1(t *testing.T) {
 	bin, _ := writeDumpMprStubMx(t, "", "wrong project file", 1)
-	_, err := ResolveQualifiedNames(context.Background(), bin, "app.mpr", nil, nil)
+	_, err := ResolveQualifiedNames(context.Background(), bin, "app.mpr", t.TempDir(), nil, nil)
 	assertDumpMprExitError(t, err, 1, "wrong project file provided")
 }
 
 func TestResolveQualifiedNames_ExitCode2(t *testing.T) {
 	bin, _ := writeDumpMprStubMx(t, "", "bad unit type", 2)
-	_, err := ResolveQualifiedNames(context.Background(), bin, "app.mpr", nil, nil)
+	_, err := ResolveQualifiedNames(context.Background(), bin, "app.mpr", t.TempDir(), nil, nil)
 	assertDumpMprExitError(t, err, 2, "invalid unit type(s)")
 }
 
 func TestResolveQualifiedNames_ExitCode3(t *testing.T) {
 	bin, _ := writeDumpMprStubMx(t, "", "export blew up", 3)
-	_, err := ResolveQualifiedNames(context.Background(), bin, "app.mpr", nil, nil)
+	_, err := ResolveQualifiedNames(context.Background(), bin, "app.mpr", t.TempDir(), nil, nil)
 	assertDumpMprExitError(t, err, 3, "unknown JSON export error")
 }
 
 func TestResolveQualifiedNames_ExitCode4(t *testing.T) {
 	bin, _ := writeDumpMprStubMx(t, "", "different mendix version", 4)
-	_, err := ResolveQualifiedNames(context.Background(), bin, "app.mpr", nil, nil)
+	_, err := ResolveQualifiedNames(context.Background(), bin, "app.mpr", t.TempDir(), nil, nil)
 	assertDumpMprExitError(t, err, 4, "project is in a different Mendix version")
 }
 
 func TestResolveQualifiedNames_UnexpectedExitCode(t *testing.T) {
 	bin, _ := writeDumpMprStubMx(t, "", "??", 99)
-	_, err := ResolveQualifiedNames(context.Background(), bin, "app.mpr", nil, nil)
+	_, err := ResolveQualifiedNames(context.Background(), bin, "app.mpr", t.TempDir(), nil, nil)
 	assertDumpMprExitError(t, err, 99, "unexpected exit code")
 }
 
@@ -523,7 +523,7 @@ func TestParseInvalidUnitTypes(t *testing.T) {
 func TestResolveQualifiedNames_TranslatesStorageTypeNames(t *testing.T) {
 	bin, seenTypesPath := writeDumpMprStubMx(t, sampleDumpJSON, "", 0)
 
-	_, err := ResolveQualifiedNames(context.Background(), bin, "app.mpr",
+	_, err := ResolveQualifiedNames(context.Background(), bin, "app.mpr", t.TempDir(),
 		[]string{"Forms$Page", "Microflows$Microflow"}, map[string]bool{"id-1": true})
 	if err != nil {
 		t.Fatalf("ResolveQualifiedNames: %v", err)
@@ -561,7 +561,7 @@ func writeRejectingDumpMprStubMx(t *testing.T, dumpJSON, rejected string) (bin B
 func TestResolveQualifiedNames_RetriesWithoutRejectedTypes(t *testing.T) {
 	bin, callsPath := writeRejectingDumpMprStubMx(t, sampleDumpJSON, "Odd$Type")
 
-	found, err := ResolveQualifiedNames(context.Background(), bin, "app.mpr",
+	found, err := ResolveQualifiedNames(context.Background(), bin, "app.mpr", t.TempDir(),
 		[]string{"Microflows$Microflow", "Odd$Type"}, map[string]bool{"id-1": true})
 
 	if found["id-1"].QualifiedName != "MyModule.ACT_Thing" {
@@ -588,7 +588,7 @@ func TestResolveQualifiedNames_RetriesWithoutRejectedTypes(t *testing.T) {
 func TestResolveQualifiedNames_UnparseableExit2IsNotRetried(t *testing.T) {
 	// "bad unit type" names nothing to drop, so a retry would fail identically.
 	bin, _ := writeDumpMprStubMx(t, "", "bad unit type", 2)
-	found, err := ResolveQualifiedNames(context.Background(), bin, "app.mpr", []string{"Microflows$Microflow"}, nil)
+	found, err := ResolveQualifiedNames(context.Background(), bin, "app.mpr", t.TempDir(), []string{"Microflows$Microflow"}, nil)
 	if found != nil {
 		t.Errorf("found = %v, want nil on a hard failure", found)
 	}
@@ -614,7 +614,7 @@ func assertDumpMprExitError(t *testing.T, err error, wantCode int, wantMeaning s
 
 func TestResolveQualifiedNames_RealExecutionFailure(t *testing.T) {
 	bin := Binary{Version: "missing", Path: "/definitely/does/not/exist/mx"}
-	_, err := ResolveQualifiedNames(context.Background(), bin, "app.mpr", nil, nil)
+	_, err := ResolveQualifiedNames(context.Background(), bin, "app.mpr", t.TempDir(), nil, nil)
 	if err == nil {
 		t.Fatal("ResolveQualifiedNames returned no error for a nonexistent binary")
 	}
@@ -626,7 +626,7 @@ func TestResolveQualifiedNames_RealExecutionFailure(t *testing.T) {
 
 func TestResolveQualifiedNames_MissingOutputFile(t *testing.T) {
 	bin, _ := writeDumpMprStubMx(t, "", "", 0) // exit 0 but never writes outPath
-	_, err := ResolveQualifiedNames(context.Background(), bin, "app.mpr", nil, map[string]bool{"id-1": true})
+	_, err := ResolveQualifiedNames(context.Background(), bin, "app.mpr", t.TempDir(), nil, map[string]bool{"id-1": true})
 	if err == nil {
 		t.Fatal("ResolveQualifiedNames returned no error when outPath was never written")
 	}
@@ -634,7 +634,7 @@ func TestResolveQualifiedNames_MissingOutputFile(t *testing.T) {
 
 func TestResolveQualifiedNames_MalformedJSON(t *testing.T) {
 	bin, _ := writeDumpMprStubMx(t, "{not valid json", "", 0)
-	_, err := ResolveQualifiedNames(context.Background(), bin, "app.mpr", nil, map[string]bool{"id-1": true})
+	_, err := ResolveQualifiedNames(context.Background(), bin, "app.mpr", t.TempDir(), nil, map[string]bool{"id-1": true})
 	if err == nil {
 		t.Fatal("ResolveQualifiedNames returned no error for malformed JSON")
 	}
@@ -644,7 +644,7 @@ func TestResolveQualifiedNames_HandlesUTF8BOM(t *testing.T) {
 	bomPrefixed := "\ufeff" + sampleDumpJSON
 	bin, _ := writeDumpMprStubMx(t, bomPrefixed, "", 0)
 
-	found, err := ResolveQualifiedNames(context.Background(), bin, "app.mpr", []string{"Microflows$Microflow"}, map[string]bool{"id-1": true})
+	found, err := ResolveQualifiedNames(context.Background(), bin, "app.mpr", t.TempDir(), []string{"Microflows$Microflow"}, map[string]bool{"id-1": true})
 	if err != nil {
 		t.Fatalf("ResolveQualifiedNames: unexpected error with BOM-prefixed output: %v", err)
 	}
@@ -666,7 +666,7 @@ func TestResolveQualifiedNames_EndToEndWithRealFixture(t *testing.T) {
 	bin, _ := writeDumpMprStubMx(t, string(fixture), "", 0)
 
 	const domainModelID = "9075c28e-b0dc-408f-b8e5-1faf1854472e"
-	found, err := ResolveQualifiedNames(context.Background(), bin, "app.mpr",
+	found, err := ResolveQualifiedNames(context.Background(), bin, "app.mpr", t.TempDir(),
 		[]string{"DomainModels$DomainModel"}, map[string]bool{domainModelID: true})
 	if err != nil {
 		t.Fatalf("ResolveQualifiedNames: unexpected error: %v", err)
@@ -677,5 +677,35 @@ func TestResolveQualifiedNames_EndToEndWithRealFixture(t *testing.T) {
 	}
 	if got.QualifiedName != "ReviewManagement.domainModel" || !got.QualifiedNameSynthesized {
 		t.Errorf("got %+v, want synthesized QualifiedName ReviewManagement.domainModel", got)
+	}
+}
+// The export must be written under outDir, where the request's cleanup and
+// the workspace janitor can reach it, and removed again on return.
+func TestResolveQualifiedNames_WritesExportIntoOutDirAndRemovesIt(t *testing.T) {
+	dir := t.TempDir()
+	seenOut := filepath.Join(dir, "seen-out.txt")
+	path := filepath.Join(dir, "mx")
+	script := "#!/bin/sh\n" +
+		fmt.Sprintf(`echo -n "$6" > %q`+"\n", seenOut) +
+		"cat > \"$6\" <<'MERA_DUMP_EOF'\n" + sampleDumpJSON + "\nMERA_DUMP_EOF\n"
+	if err := os.WriteFile(path, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	outDir := t.TempDir()
+
+	_, err := ResolveQualifiedNames(context.Background(), Binary{Version: "stub", Path: path},
+		"app.mpr", outDir, []string{"Microflows$Microflow"}, map[string]bool{"id-1": true})
+	if err != nil {
+		t.Fatalf("ResolveQualifiedNames: %v", err)
+	}
+	got, err := os.ReadFile(seenOut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Dir(string(got)) != outDir {
+		t.Errorf("dump-mpr --output-file = %q, want a file directly under %q", got, outDir)
+	}
+	if entries, _ := os.ReadDir(outDir); len(entries) != 0 {
+		t.Errorf("export left behind in outDir: %v", entries)
 	}
 }

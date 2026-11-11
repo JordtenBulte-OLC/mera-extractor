@@ -114,7 +114,7 @@ func newHarness(t *testing.T) *harness {
 			Diff: func(ctx context.Context, bin mx.Binary, basePath, headPath, outPath string) (mx.DiffResult, error) {
 				return mx.DiffResult{}, nil
 			},
-			ResolveQualifiedNames: func(ctx context.Context, bin mx.Binary, mprPath string, unitTypes []string, wantIDs map[string]bool) (map[string]mx.ResolvedUnit, error) {
+			ResolveQualifiedNames: func(ctx context.Context, bin mx.Binary, mprPath, outDir string, unitTypes []string, wantIDs map[string]bool) (map[string]mx.ResolvedUnit, error) {
 				h.mu.Lock()
 				h.resolveCalls = append(h.resolveCalls, mprPath)
 				h.resolveTypes = append(h.resolveTypes, unitTypes)
@@ -174,7 +174,7 @@ func (h *harness) setDiff(units ...mx.UnitDifference) {
 // by id, so a rename is expressed simply by giving the two sides different
 // names for the same id.
 func (h *harness) setNames(base, head map[string]mx.ResolvedUnit) {
-	h.srv.Deps.ResolveQualifiedNames = func(ctx context.Context, bin mx.Binary, mprPath string, unitTypes []string, wantIDs map[string]bool) (map[string]mx.ResolvedUnit, error) {
+	h.srv.Deps.ResolveQualifiedNames = func(ctx context.Context, bin mx.Binary, mprPath, outDir string, unitTypes []string, wantIDs map[string]bool) (map[string]mx.ResolvedUnit, error) {
 		h.mu.Lock()
 		h.resolveCalls = append(h.resolveCalls, mprPath)
 		h.resolveTypes = append(h.resolveTypes, unitTypes)
@@ -776,7 +776,7 @@ func TestExtract_DescribeFailureDegradesToAWarning(t *testing.T) {
 func TestExtract_ResolveFailureDegrades(t *testing.T) {
 	h := newHarness(t)
 	h.setDiff(mx.UnitDifference{Type: "Microflows$Microflow", ID: "x", Change: "Modified"})
-	h.srv.Deps.ResolveQualifiedNames = func(ctx context.Context, bin mx.Binary, mprPath string, unitTypes []string, wantIDs map[string]bool) (map[string]mx.ResolvedUnit, error) {
+	h.srv.Deps.ResolveQualifiedNames = func(ctx context.Context, bin mx.Binary, mprPath, outDir string, unitTypes []string, wantIDs map[string]bool) (map[string]mx.ResolvedUnit, error) {
 		return nil, errors.New("dump-mpr exploded")
 	}
 	resp := decodeExtract(t, h.postDefault())
@@ -803,7 +803,7 @@ func TestExtract_PartialResolveKeepsTheNamesItGot(t *testing.T) {
 		mx.UnitDifference{Type: "Microflows$Microflow", ID: "mf", Change: "Modified"},
 		mx.UnitDifference{Type: "Odd$Type", ID: "odd", Change: "Modified"},
 	)
-	h.srv.Deps.ResolveQualifiedNames = func(ctx context.Context, bin mx.Binary, mprPath string, unitTypes []string, wantIDs map[string]bool) (map[string]mx.ResolvedUnit, error) {
+	h.srv.Deps.ResolveQualifiedNames = func(ctx context.Context, bin mx.Binary, mprPath, outDir string, unitTypes []string, wantIDs map[string]bool) (map[string]mx.ResolvedUnit, error) {
 		return map[string]mx.ResolvedUnit{"mf": mf("mf", "Sales.ACT_Thing")},
 			&mx.UnitTypesSkippedError{Types: []string{"Odd$Type"}}
 	}
@@ -842,7 +842,7 @@ func TestExtract_NothingNamedIsLoggedAsErrorWithMxStderr(t *testing.T) {
 		mx.UnitDifference{Type: "Microflows$Microflow", ID: "a", Change: "Modified"},
 		mx.UnitDifference{Type: "Forms$Page", ID: "b", Change: "Modified"},
 	)
-	h.srv.Deps.ResolveQualifiedNames = func(ctx context.Context, bin mx.Binary, mprPath string, unitTypes []string, wantIDs map[string]bool) (map[string]mx.ResolvedUnit, error) {
+	h.srv.Deps.ResolveQualifiedNames = func(ctx context.Context, bin mx.Binary, mprPath, outDir string, unitTypes []string, wantIDs map[string]bool) (map[string]mx.ResolvedUnit, error) {
 		return nil, &mx.DumpMprExitError{ExitCode: 2, Stderr: "Invalid unit type(s) 'Forms$Page'\n"}
 	}
 	w := h.postDefault()
@@ -952,6 +952,11 @@ func TestTypeTablesAreCoherent(t *testing.T) {
 		"regularexpression", "businesseventservice", "databaseconnection", "agent", "aimodel",
 		"knowledgebase", "consumedmcpservice", "datatransformer", "modulerole", "userrole",
 		"projectsecurity", "settings", "demouser", "navigation", "systemoverview",
+		// Added in v0.27.0's `describe --help` (the container's build; the
+		// v0.19 names above survive there as "old:" aliases).
+		"rule", "javascriptaction", "consumedrestservice", "consumedodataservice",
+		"publishedodataservice", "publishedrestservice", "taskqueue", "appsecurity",
+		"domainmodel",
 	} {
 		valid[ut] = true
 	}

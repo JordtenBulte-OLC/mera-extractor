@@ -28,7 +28,15 @@ type CloneBothResult struct {
 // fetch, two model-only checkouts and one text-diff prefetch, each lazy-blob
 // step its own network round trip. Package-level so a test can shrink it;
 // SetCloneBothTimeout is the startup knob (MERA_CLONE_TIMEOUT).
-var cloneBothTimeout = 300 * time.Second
+//
+// ▶ Why 3 minutes, not the earlier 5: on 2026-10-30 Team Server served blobs
+// at ~90 KB/s and a pair that had cloned in seconds on 10-21 spent 5+ minutes
+// in the base checkout alone. At 300s this deadline also tied with the
+// Mendix caller's own 300s HTTP timeout, so the caller always hung up first
+// and never saw this error. A clone that has not finished in 180s means
+// Team Server is too slow to be worth waiting on, and the 502 that says so
+// should reach the caller with time to spare.
+var cloneBothTimeout = 180 * time.Second
 
 // SetCloneBothTimeout replaces the CloneBoth deadline. Call once at startup,
 // before serving. Whatever calls /extract must wait LONGER than this, or it

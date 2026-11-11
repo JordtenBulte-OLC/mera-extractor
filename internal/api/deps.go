@@ -32,7 +32,7 @@ type Deps struct {
 	MxResolve             func(mxRoot, mendixVersion string) (mx.Binary, error)
 	PrepareMpr            func(ctx context.Context, bin mx.Binary, dir string) (string, mx.AnalyzeResult, error)
 	Diff                  func(ctx context.Context, bin mx.Binary, basePath, headPath, outPath string) (mx.DiffResult, error)
-	ResolveQualifiedNames func(ctx context.Context, bin mx.Binary, mprPath string, unitTypes []string, wantIDs map[string]bool) (map[string]mx.ResolvedUnit, error)
+	ResolveQualifiedNames func(ctx context.Context, bin mx.Binary, mprPath, outDir string, unitTypes []string, wantIDs map[string]bool) (map[string]mx.ResolvedUnit, error)
 
 	Describe     func(ctx context.Context, req mxcli.DescribeRequest) (string, error)
 	ListUnits    func(ctx context.Context, mprPath, unitType, module string) ([]mxcli.UnitSummary, error)

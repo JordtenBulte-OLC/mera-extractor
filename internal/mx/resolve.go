@@ -87,10 +87,20 @@ const maxContainerChainDepth = 32
 // once without them: the result then comes back non-nil TOGETHER with an
 // *UnitTypesSkippedError naming what was dropped. Any other error comes back
 // with a nil map.
-func ResolveQualifiedNames(ctx context.Context, bin Binary, mprPath string, unitTypes []string, wantIDs map[string]bool) (map[string]ResolvedUnit, error) {
+//
+// outDir is where dump-mpr writes its JSON export, removed again before
+// returning. Pass the request's workdir, never os.TempDir().
+//
+// ▶ Why: the export is a whole-model dump of every unit of the requested
+// types. That can be large, and it outlives the call whenever the process
+// is killed mid-dump, which is exactly what a timeout does. In the workdir it
+// is removed with the rest of the request by Cleanup, or by the workspace
+// janitor if the request itself died. In /tmp nothing ever reaps it. Seen
+// for real on 2026-10-30: a cancelled request left its dump target in /tmp.
+func ResolveQualifiedNames(ctx context.Context, bin Binary, mprPath, outDir string, unitTypes []string, wantIDs map[string]bool) (map[string]ResolvedUnit, error) {
 	types := ensureModuleType(dumpMprUnitTypes(unitTypes))
 
-	found, err := dumpAndResolve(ctx, bin, mprPath, types, wantIDs)
+	found, err := dumpAndResolve(ctx, bin, mprPath, outDir, types, wantIDs)
 	var exitErr *DumpMprExitError
 	if !errors.As(err, &exitErr) || exitErr.ExitCode != 2 {
 		return found, err
@@ -105,7 +115,7 @@ func ResolveQualifiedNames(ctx context.Context, bin Binary, mprPath string, unit
 	if len(invalid) == 0 || len(kept) == len(types) {
 		return nil, err // nothing recognisable to drop; retrying would fail the same way
 	}
-	found, err = dumpAndResolve(ctx, bin, mprPath, kept, wantIDs)
+	found, err = dumpAndResolve(ctx, bin, mprPath, outDir, kept, wantIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -124,8 +134,8 @@ func (e *UnitTypesSkippedError) Error() string {
 		strings.Join(e.Types, ", "))
 }
 
-func dumpAndResolve(ctx context.Context, bin Binary, mprPath string, types []string, wantIDs map[string]bool) (map[string]ResolvedUnit, error) {
-	outPath := filepath.Join(os.TempDir(), fmt.Sprintf("mera-dump-%d.json", time.Now().UnixNano()))
+func dumpAndResolve(ctx context.Context, bin Binary, mprPath, outDir string, types []string, wantIDs map[string]bool) (map[string]ResolvedUnit, error) {
+	outPath := filepath.Join(outDir, fmt.Sprintf("mera-dump-%d.json", time.Now().UnixNano()))
 	defer os.Remove(outPath)
 
 	res, err := run(ctx, bin, 5*time.Minute, "dump-mpr", mprPath,

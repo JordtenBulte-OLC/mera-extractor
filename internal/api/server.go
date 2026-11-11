@@ -17,6 +17,11 @@ type Server struct {
 	// Nil is valid — Manager.Track is nil-safe — so every existing
 	// &Server{...} in the tests keeps working with no change.
 	Workspace *workspace.Manager
+
+	// inflight collapses identical concurrent /extract requests; see
+	// inflight.go. Unexported and zero-value ready, so construction sites
+	// are unaffected.
+	inflight extractFlights
 }
 
 func NewServer(workRoot, mxRoot string) *Server {
